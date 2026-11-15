@@ -3,6 +3,8 @@
 
   let state = null;
   let selectedIds = new Set();
+  let settingsDirty = false;
+  let settingsFocused = false;
 
   function formatEta(ts) {
     if (!ts) return "";
@@ -99,7 +101,8 @@
       .replace(/"/g, "&quot;");
   }
 
-  function fillSettings() {
+  function fillSettings({ force = false } = {}) {
+    if (!force && (settingsDirty || settingsFocused)) return;
     const s = state.settings;
     $("delay-min").value = s.delayMinSec;
     $("delay-max").value = s.delayMaxSec;
@@ -117,7 +120,8 @@
       selectedIds = new Set((state.groups || []).filter((g) => g.enabled).map((g) => g.id));
     }
     renderStatus();
-    renderGroups();
+    // Don't rebuild the group list while typing in settings (focus flicker)
+    if (!settingsFocused) renderGroups();
     fillSettings();
   }
 
@@ -290,7 +294,21 @@
     renderGroups();
   });
 
-  $("settings-form").addEventListener("submit", async (e) => {
+  const settingsForm = $("settings-form");
+  settingsForm.addEventListener("input", () => {
+    settingsDirty = true;
+  });
+  settingsForm.addEventListener("focusin", () => {
+    settingsFocused = true;
+  });
+  settingsForm.addEventListener("focusout", () => {
+    // Defer so clicking Save still counts as focused during submit
+    setTimeout(() => {
+      settingsFocused = Boolean(settingsForm.contains(document.activeElement));
+    }, 0);
+  });
+
+  settingsForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const delayMinSec = Number($("delay-min").value);
     const delayMaxSec = Number($("delay-max").value);
@@ -311,8 +329,12 @@
       batchBreakMinSec,
       batchBreakMaxSec,
       dailyCap: Math.min(100, Number($("daily-cap").value)),
+      settingsRevision: 3,
     });
+    settingsDirty = false;
+    settingsFocused = false;
     await refresh();
+    fillSettings({ force: true });
   });
 
   chrome.runtime.onMessage.addListener((message) => {
