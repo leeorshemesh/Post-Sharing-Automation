@@ -208,12 +208,14 @@
       const label = labelOf(el);
       const aria = normalize(el.getAttribute("aria-label") || "");
       if (!label && !aria) return 0;
-      // Avoid "Share to a group" here — that's the menu item later
-      if (/share to (a )?group|share now|share to feed|share to your story/.test(label)) return 0;
-      if (/^share$/.test(label) || /^share$/.test(aria)) return 900;
+      // Destinations / later-step controls — not the post Share arrow
+      if (/share to|share now|your story|messenger|send in/.test(label + " " + aria)) return 0;
+      if (/^group$|^feed$|^story$|^post$/.test(label)) return 0;
+      // Facebook Share is often an arrow icon with aria-label "Share" / "Send this to…"
       if (aria === "share" || label === "share") return 950;
-      if (/\bshare\b/.test(aria) && aria.length < 40) return 700;
-      if (label === "send") return 400;
+      if (/^share$/.test(label) || /^share$/.test(aria)) return 900;
+      if (/^send this to friends or post it on your profile$/.test(aria)) return 920;
+      if (/\bshare\b/.test(aria) && aria.length < 48) return 700;
       return 0;
     });
   }
@@ -227,26 +229,66 @@
     return findShareInRoot(document);
   }
 
-  function findShareToGroupOption() {
-    const roots = menus().length ? menus() : [document];
+  function shareSheetRoots() {
+    const layered = [
+      ...dialogs(),
+      ...queryAll('[role="dialog"]'),
+      ...queryAll('[role="menu"]'),
+      ...queryAll('[aria-label*="Share" i]'),
+      ...queryAll('[aria-label*="share" i]'),
+    ].filter(visible);
+    // Deduplicate
+    return [...new Set(layered.length ? layered : [document])];
+  }
+
+  function findGroupUnderShareTo() {
+    // Exact UI: share sheet → section labeled "Share to" → button "Group"
+    const roots = shareSheetRoots();
+
+    for (const root of roots) {
+      // Prefer a control whose accessible name is exactly "Group"
+      const exactGroup = pickBest(findClickables(root), (el) => {
+        const label = labelOf(el);
+        const aria = normalize(el.getAttribute("aria-label") || "");
+        if (label === "group" || aria === "group") return 1000;
+        if (/^share to group$/.test(label) || /^share to a group$/.test(label)) return 800;
+        return 0;
+      });
+      if (exactGroup) return exactGroup;
+
+      // Find a "Share to" heading/label, then a nearby "Group" control
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      let node = walker.nextNode();
+      while (node) {
+        const t = normalize(textOf(node));
+        if (visible(node) && (t === "share to" || /^share to$/.test(t)) && t.length < 20) {
+          const section =
+            node.closest?.("div")?.parentElement ||
+            node.parentElement ||
+            node;
+          const scope = section?.parentElement || section || root;
+          const groupBtn = pickBest(findClickables(scope), (el) => {
+            const label = labelOf(el);
+            if (label === "group") return 1000;
+            if (label.startsWith("group")) return 700;
+            return 0;
+          });
+          if (groupBtn) return groupBtn;
+        }
+        node = walker.nextNode();
+      }
+    }
+
+    // Fallbacks for older Facebook copy
     for (const root of roots) {
       const hit = findByLabel(
-        [
-          /share to (a )?group/,
-          /share in (a )?group/,
-          /post to (a )?group/,
-          /^group$/,
-        ],
+        [/^group$/, /share to (a )?group/, /share in (a )?group/],
         root,
-        { maxLen: 80 }
+        { maxLen: 60 }
       );
       if (hit) return hit;
     }
-    return findByLabel(
-      [/share to (a )?group/, /share in (a )?group/, /^group$/],
-      document,
-      { maxLen: 80 }
-    );
+    return null;
   }
 
   function findGroupSearchInput() {
@@ -377,50 +419,60 @@
     return null;
   }
 
-  function scoreConfirmButton(el) {
+  function isCreatePostDialog(root) {
+    const t = normalize(textOf(root)).slice(0, 500);
+    return (
+      /create post/.test(t) ||
+      /say something about this/.test(t) ||
+      /write a post/.test(t)
+    );
+  }
+
+  function findCreatePostDialog() {
+    const all = dialogs();
+    const create = all.find(isCreatePostDialog);
+    if (create) return create;
+    // Sometimes the title is outside role=dialog text sampling — check aria-label
+    return (
+      all.find((d) => /create post|share/i.test(d.getAttribute("aria-label") || "")) ||
+      null
+    );
+  }
+
+  function scoreCreatePostButton(el) {
     const label = labelOf(el);
     const aria = normalize(el.getAttribute("aria-label") || "");
     const combined = label || aria;
-    if (!combined || combined.length > 48) return 0;
-    // Facebook's share-to-group composer uses "Share" (not always "Post")
-    if (/^(share|post|publish)$/.test(combined)) return 1000;
-    if (/^(share|post|publish)$/.test(aria)) return 1000;
-    if (/^share now$/.test(combined)) return 600;
+    if (!combined || combined.length > 40) return 0;
+    // Final step in "Create post" is Post (not the earlier Share arrow)
+    if (/^post$/.test(combined) || /^post$/.test(aria)) return 1000;
+    if (/^publish$/.test(combined)) return 800;
+    // Only accept Share here as a weak fallback
+    if (/^share$/.test(combined)) return 400;
     return 0;
   }
 
-  function findConfirmCandidates(root) {
-    const scored = findClickables(root)
-      .map((el) => ({ el, score: scoreConfirmButton(el) }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score);
-    return scored.map((x) => x.el);
-  }
-
-  function findPostConfirmButton() {
-    const roots = dialogs().length ? dialogs() : [document];
-    // Try every matching Share/Post control; don't stop at a disabled lookalike
+  function findCreatePostSubmitButton() {
+    const createDlg = findCreatePostDialog();
+    const roots = createDlg ? [createDlg] : dialogs().length ? dialogs() : [];
     for (const root of roots) {
-      for (const btn of findConfirmCandidates(root)) {
-        if (!looksUnusable(btn)) return btn;
+      const candidates = findClickables(root)
+        .map((el) => ({ el, score: scoreCreatePostButton(el) }))
+        .filter((x) => x.score > 0)
+        .sort((a, b) => b.score - a.score);
+      for (const { el } of candidates) {
+        if (!looksUnusable(el)) return el;
       }
-    }
-    // Last resort: any visible Share/Post text node inside a dialog
-    for (const root of roots) {
+
+      // Text-node fallback: visible "Post" label inside Create post
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
       let node = walker.nextNode();
       while (node) {
-        if (visible(node) && /^(share|post)$/.test(normalize(textOf(node))) && textOf(node).length <= 12) {
+        const raw = textOf(node);
+        if (visible(node) && normalize(raw) === "post" && raw.length <= 8) {
           const clickable =
             node.closest?.('[role="button"], button, [tabindex="0"]') || node;
-          if (visible(clickable) && !looksUnusable(clickable) && scoreConfirmButton(clickable) > 0) {
-            return clickable;
-          }
-          // Parent may not carry the label — still try clicking the closest button shell
-          if (visible(clickable) && !looksUnusable(clickable)) {
-            const parentLabel = labelOf(clickable);
-            if (!parentLabel || /share|post|publish/.test(parentLabel)) return clickable;
-          }
+          if (visible(clickable) && !looksUnusable(clickable)) return clickable;
         }
         node = walker.nextNode();
       }
@@ -440,8 +492,25 @@
     return false;
   }
 
-  async function waitForEnabledPost(timeout = 16000) {
-    return waitFor(() => findPostConfirmButton(), { timeout, interval: 300 });
+  async function waitForCreatePostSubmit(timeout = 18000) {
+    return waitFor(() => findCreatePostSubmitButton(), { timeout, interval: 300 });
+  }
+
+  async function waitForShareFinished(timeout = 10000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const challenge = detectChallenge();
+      if (challenge) {
+        const err = new Error(challenge);
+        err.blocked = true;
+        throw err;
+      }
+      // Success when Create post dialog is gone
+      if (!findCreatePostDialog()) return true;
+      await sleep(300);
+    }
+    // Dialog still open — treat as uncertain failure
+    return false;
   }
 
   async function runShareOnce(group) {
@@ -454,58 +523,70 @@
         await closeOpenDialogs();
         await sleep(500);
 
-        await reportStep("Looking for Share on this post…");
+        // 1) Post screen → Share (arrow)
+        await reportStep("1/5 Clicking Share (arrow) on the post…");
         const shareBtn = await waitFor(() => findShareButton(), { timeout: 12000 });
-        if (!shareBtn) throw new Error("Could not find the Share button on this post. Open the post permalink and try again.");
+        if (!shareBtn) {
+          throw new Error("Could not find the Share arrow on this post. Open the post and try again.");
+        }
         click(shareBtn);
-        await sleep(1100);
+        await sleep(1200);
 
-        await reportStep('Choosing “Share to a group”…');
-        const groupOpt = await waitFor(() => findShareToGroupOption(), { timeout: 12000 });
+        // 2) Share sheet → under "Share to" → Group
+        await reportStep('2/5 Clicking “Group” under Share to…');
+        const groupOpt = await waitFor(() => findGroupUnderShareTo(), { timeout: 12000 });
         if (!groupOpt) {
           throw new Error(
-            'Could not find “Share to a group”. Click Share once manually and confirm that option appears for this post.'
+            'Could not find the “Group” button under “Share to”. Open Share manually once and confirm that row is there.'
           );
         }
         click(groupOpt);
-        await sleep(1300);
-
-        await reportStep(`Searching for group “${group.name}”…`);
-        const search = await waitFor(() => findGroupSearchInput(), { timeout: 12000 });
-        if (!search) throw new Error("Could not find the group search field in the share dialog.");
-        await clearAndType(search, group.name);
         await sleep(1400);
 
-        await reportStep(`Selecting “${group.name}” from results…`);
+        // 3) Group picker → search bar at top
+        await reportStep(`3/5 Searching for “${group.name}”…`);
+        const search = await waitFor(() => findGroupSearchInput(), { timeout: 12000 });
+        if (!search) throw new Error("Could not find the group search bar at the top of the popup.");
+        await clearAndType(search, group.name);
+        await sleep(1500);
+
+        await reportStep(`3/5 Selecting “${group.name}”…`);
         const result = await waitFor(() => findGroupResult(group.name), { timeout: 14000 });
         if (!result) {
           throw new Error(
-            `Could not find “${group.name}” in Facebook’s group search. Use the exact group name, and make sure you joined it.`
+            `Could not find “${group.name}” in the group list. Use the exact name, and make sure you joined it.`
           );
         }
         click(result);
-        await sleep(1200);
+        await sleep(1400);
 
-        await reportStep("Clicking Share/Post…");
-        // Composer can take a moment after group selection before Share enables
-        await sleep(800);
-        const postBtn = await waitForEnabledPost(18000);
+        // 4) Create post popup → Post
+        await reportStep("4/5 Waiting for Create post…");
+        const createDlg = await waitFor(() => findCreatePostDialog(), { timeout: 12000 });
+        if (!createDlg) {
+          throw new Error('Could not find the “Create post” popup after selecting the group.');
+        }
+
+        await reportStep("5/5 Clicking Post…");
+        const postBtn = await waitForCreatePostSubmit(18000);
         if (!postBtn) {
+          throw new Error('Could not find the Post button in the Create post popup.');
+        }
+        click(postBtn);
+
+        await reportStep("Waiting for Create post to close…");
+        const finished = await waitForShareFinished(12000);
+        if (!finished) {
           throw new Error(
-            'Could not find the final Share/Post button after selecting the group. If you see Share in the dialog, tell me the exact label text.'
+            "Create post stayed open after clicking Post — the share may not have gone through."
           );
         }
-        await reportStep(`Clicking “${(postBtn.getAttribute("aria-label") || textOf(postBtn) || "Share").trim()}”…`);
-        click(postBtn);
-        await sleep(1800);
 
         const after = detectChallenge();
         if (after) return { ok: false, blocked: true, error: after };
 
-        // Best-effort success: dialog should close or Post control disappear
-        await sleep(700);
         await reportStep(`Shared to “${group.name}”.`);
-        await closeOpenDialogs();
+        await sleep(400);
         return { ok: true, groupId: group.id, groupName: group.name };
       } catch (err) {
         if (err.blocked || /challenge|captcha|blocked|suspended/i.test(err.message || "")) {
