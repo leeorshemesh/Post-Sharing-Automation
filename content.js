@@ -74,11 +74,26 @@
     return false;
   }
 
-  function click(el) {
+  function click(el, { allowSameOrigin = false } = {}) {
     if (!el) return false;
-    if (isNavigatingLink(el)) {
-      console.warn("[FGS] Refusing to click navigating link:", hrefOf(el));
-      return false;
+    const href = hrefOf(el);
+    if (href) {
+      try {
+        const u = new URL(href, location.href);
+        const external = u.origin !== location.origin;
+        if (external) {
+          console.warn("[FGS] Refusing external link:", href);
+          return false;
+        }
+        // Share-sheet tiles are often same-origin <a> tags that open in-sheet UI.
+        // Only block those when allowSameOrigin is false (e.g. the post Share arrow).
+        if (!allowSameOrigin && isNavigatingLink(el)) {
+          console.warn("[FGS] Refusing navigating link:", href);
+          return false;
+        }
+      } catch (_) {
+        return false;
+      }
     }
     el.scrollIntoView({ block: "center", inline: "nearest" });
     const rect = el.getBoundingClientRect();
@@ -92,7 +107,7 @@
     el.dispatchEvent(new PointerEvent("pointerup", opts));
     el.dispatchEvent(new MouseEvent("mouseup", opts));
     el.dispatchEvent(new MouseEvent("click", opts));
-    // Prefer dispatch-only for controls that might be wrapped in links
+    // Prefer dispatch-only when wrapped in anchors (avoids hard navigation)
     if (typeof el.click === "function" && !el.closest?.("a[href]")) el.click();
     return true;
   }
@@ -290,66 +305,148 @@
     return null;
   }
 
+  function ownText(el) {
+    return normalize(
+      [...(el?.childNodes || [])]
+        .filter((n) => n.nodeType === Node.TEXT_NODE)
+        .map((n) => n.textContent || "")
+        .join(" ")
+    );
+  }
+
+  function findExactTextNodes(text, root = document) {
+    const target = normalize(text);
+    const matches = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let node = walker.nextNode();
+    while (node) {
+      if (visible(node)) {
+        const own = ownText(node);
+        const full = normalize(textOf(node));
+        // Exact leaf label like "Group" / "Share to"
+        if (own === target || (full === target && full.length <= 24)) {
+          matches.push(node);
+        }
+      }
+      node = walker.nextNode();
+    }
+    // Smallest hit first (most specific label node)
+    matches.sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return ar.width * ar.height - br.width * br.height;
+    });
+    return matches;
+  }
+
+  function clickableAncestor(el) {
+    return (
+      el.closest?.(
+        '[role="button"], [role="menuitem"], [role="menuitemradio"], [role="link"], button, a[href], div[tabindex="0"], span[role="button"]'
+      ) || el
+    );
+  }
+
   function shareSheetRoots() {
     const layered = [
       ...dialogs(),
-      ...queryAll('[role="dialog"]'),
       ...queryAll('[role="menu"]'),
+      ...queryAll('[role="listbox"]'),
       ...queryAll('[aria-label*="Share" i]'),
       ...queryAll('[aria-label*="share" i]'),
     ].filter(visible);
-    // Deduplicate
-    return [...new Set(layered.length ? layered : [document])];
-  }
 
-  function findGroupUnderShareTo() {
-    // Exact UI: share sheet → section labeled "Share to" → button "Group"
-    const roots = shareSheetRoots();
-
-    for (const root of roots) {
-      // Prefer a control whose accessible name is exactly "Group"
-      const exactGroup = pickBest(findClickables(root), (el) => {
-        const label = labelOf(el);
-        const aria = normalize(el.getAttribute("aria-label") || "");
-        if (label === "group" || aria === "group") return 1000;
-        if (/^share to group$/.test(label) || /^share to a group$/.test(label)) return 800;
-        return 0;
-      });
-      if (exactGroup) return exactGroup;
-
-      // Find a "Share to" heading/label, then a nearby "Group" control
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-      let node = walker.nextNode();
-      while (node) {
-        const t = normalize(textOf(node));
-        if (visible(node) && (t === "share to" || /^share to$/.test(t)) && t.length < 20) {
-          const section =
-            node.closest?.("div")?.parentElement ||
-            node.parentElement ||
-            node;
-          const scope = section?.parentElement || section || root;
-          const groupBtn = pickBest(findClickables(scope), (el) => {
-            const label = labelOf(el);
-            if (label === "group") return 1000;
-            if (label.startsWith("group")) return 700;
-            return 0;
-          });
-          if (groupBtn) return groupBtn;
+    // Facebook often renders the share popover without role=dialog.
+    // Anchor on the "Share to" label and climb to a reasonable container.
+    for (const label of findExactTextNodes("Share to", document)) {
+      let scope = label.parentElement;
+      for (let i = 0; i < 8 && scope; i++) {
+        const t = normalize(textOf(scope));
+        if (
+          t.includes("share to") &&
+          (t.includes("group") || t.includes("feed") || t.includes("story"))
+        ) {
+          layered.push(scope);
+          break;
         }
-        node = walker.nextNode();
+        scope = scope.parentElement;
       }
     }
 
-    // Fallbacks for older Facebook copy
-    for (const root of roots) {
-      const hit = findByLabel(
-        [/^group$/, /share to (a )?group/, /share in (a )?group/],
-        root,
-        { maxLen: 60 }
-      );
-      if (hit) return hit;
+    return [...new Set(layered.length ? layered : [])];
+  }
+
+  function findGroupUnderShareTo() {
+    // UI: after Share arrow → popover with "Share to" → destination tile "Group"
+    const roots = shareSheetRoots();
+    const searchRoots = roots.length ? roots : [document];
+
+    for (const root of searchRoots) {
+      // 1) Exact "Group" text near Share to / Feed / Story
+      const groupLabels = findExactTextNodes("Group", root);
+      for (const labelEl of groupLabels) {
+        const clickable = clickableAncestor(labelEl);
+        if (!visible(clickable) || looksUnusable(clickable)) continue;
+        // Must not be the nav "Groups" item (usually longer path / different context)
+        const aria = normalize(clickable.getAttribute("aria-label") || "");
+        if (/groups$/.test(aria) && aria !== "group") continue;
+        const bubble = normalize(textOf(clickable)).slice(0, 80);
+        // Destination tiles are short ("Group"); nav links are longer
+        if (bubble.length > 40 && !/^group\b/.test(bubble)) continue;
+        return clickable;
+      }
+
+      // 2) role/aria based
+      const candidates = [
+        ...findClickables(root),
+        ...queryAll('[role="link"]', root).filter(visible),
+        ...queryAll("a[href]", root).filter(visible),
+      ];
+      const scored = pickBest(candidates, (el) => {
+        if (looksUnusable(el)) return 0;
+        try {
+          const href = hrefOf(el);
+          if (href) {
+            const u = new URL(href, location.href);
+            if (u.origin !== location.origin) return 0;
+          }
+        } catch (_) {
+          return 0;
+        }
+        const label = labelOf(el);
+        const aria = normalize(el.getAttribute("aria-label") || "");
+        if (label === "group" || aria === "group") return 1000;
+        if (/^share to (a )?group$/.test(label)) return 900;
+        if (label === "groups" || aria === "groups") return 200; // weak — often left nav
+        return 0;
+      });
+      if (scored) return scored;
     }
+
+    // 3) Document-wide: "Share to" present, then closest "Group" tile
+    const shareTo = findExactTextNodes("Share to", document)[0];
+    if (shareTo) {
+      let scope = shareTo.parentElement;
+      for (let i = 0; i < 10 && scope; i++) {
+        const groupLabels = findExactTextNodes("Group", scope);
+        if (groupLabels.length) {
+          const clickable = clickableAncestor(groupLabels[0]);
+          if (visible(clickable) && !looksUnusable(clickable)) return clickable;
+        }
+        scope = scope.parentElement;
+      }
+    }
+
     return null;
+  }
+
+  function shareSheetVisible() {
+    if (findExactTextNodes("Share to", document).length) return true;
+    if (findGroupUnderShareTo()) return true;
+    return shareSheetRoots().some((root) => {
+      const t = normalize(textOf(root));
+      return t.includes("share to") || t.includes("share now");
+    });
   }
 
   function findGroupSearchInput() {
@@ -602,7 +699,15 @@
         if (!click(shareBtn)) {
           throw new Error("Share control looked like a link that would leave this post — skipped it.");
         }
-        await sleep(1200);
+
+        await reportStep("1/5 Waiting for Share to sheet…");
+        const sheet = await waitFor(() => shareSheetVisible(), { timeout: 12000 });
+        if (!sheet) {
+          throw new Error(
+            'Share sheet did not appear after clicking the Share arrow. Try clicking Share once manually to confirm it opens.'
+          );
+        }
+        await sleep(500);
 
         if (location.href !== startUrl) {
           throw new Error("Clicking Share navigated away from the post. Re-open the post and try again.");
@@ -616,7 +721,9 @@
             'Could not find the “Group” button under “Share to”. Open Share manually once and confirm that row is there.'
           );
         }
-        click(groupOpt);
+        if (!click(groupOpt, { allowSameOrigin: true })) {
+          throw new Error("Found Group but could not click it safely.");
+        }
         await sleep(1400);
 
         // 3) Group picker → search bar at top
