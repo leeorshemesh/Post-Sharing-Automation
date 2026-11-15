@@ -3,7 +3,8 @@
 (() => {
   const BANNER_ID = "fgs-banner";
   const PANEL_ID = "fgs-panel";
-  const MAX_STEP_ATTEMPTS = 2;
+  // One attempt per group — failures skip forward instead of retry-looping
+  const MAX_STEP_ATTEMPTS = 1;
 
   let lastState = null;
   let countdownTimer = null;
@@ -258,6 +259,39 @@
       return "Facebook showed a security or rate-limit challenge. Complete it manually, then Resume.";
     }
     return null;
+  }
+
+  function detectGroupPostBlocked() {
+    // Group-specific refusal — skip this group, do not pause the whole session
+    const bodyText = normalize(document.body?.innerText?.slice(0, 12000) || "");
+    const checks = [
+      /you can't post/i,
+      /you cannot post/i,
+      /only admins can post/i,
+      /only members can post/i,
+      /only group admins/i,
+      /posting in this group is turned off/i,
+      /posts to this group are turned off/i,
+      /this group doesn't allow/i,
+      /group doesn't allow/i,
+      /content isn't available/i,
+      /no longer a member/i,
+      /you're not a member/i,
+      /pending admin approval/i,
+      /waiting for admin approval/i,
+      /your post is pending/i,
+      /can't share this/i,
+      /unable to share/i,
+      /sharing is unavailable/i,
+    ];
+    if (checks.some((re) => re.test(bodyText))) {
+      return "This group doesn't allow the post — skipped.";
+    }
+    return null;
+  }
+
+  function skipResult(error) {
+    return { ok: false, skip: true, error };
   }
 
   async function waitFor(fn, { timeout = 14000, interval = 250 } = {}) {
@@ -1046,38 +1080,59 @@
         await sleep(500);
 
         await reportStep(`3/5 Selecting “${group.name}”…`);
-        const result = await waitFor(() => findGroupResult(group.name), { timeout: 14000 });
+        const result = await waitFor(() => findGroupResult(group.name), { timeout: 10000 });
         if (!result) {
-          throw new Error(
-            `Could not find “${group.name}” in the group list. Use the exact name, and make sure you joined it.`
+          const blocked = detectGroupPostBlocked();
+          await dismissStuckComposersOnly();
+          return skipResult(
+            blocked ||
+              `Could not find “${group.name}” in the group list — skipped.`
           );
         }
         click(result, { allowSameOrigin: true });
         await sleep(600);
 
+        const earlyBlock = detectGroupPostBlocked();
+        if (earlyBlock) {
+          await dismissStuckComposersOnly();
+          return skipResult(earlyBlock);
+        }
+
         // 4) Create post popup → Post
         await reportStep("4/5 Waiting for Create post…");
-        const createDlg = await waitFor(() => findCreatePostDialog(), { timeout: 14000 });
+        const createDlg = await waitFor(() => findCreatePostDialog(), { timeout: 10000 });
         if (!createDlg) {
-          throw new Error(
-            'Could not find the “Create post” popup after selecting the group. If the group list is still open, the group row may not have been selected.'
+          const blocked = detectGroupPostBlocked();
+          await dismissStuckComposersOnly();
+          return skipResult(
+            blocked ||
+              `Create post did not open for “${group.name}” (group may disallow posts) — skipped.`
           );
         }
 
         await reportStep("5/5 Clicking Post (once)…");
         await sleep(350);
-        const postBtn = await waitForCreatePostSubmit(20000);
+        const postBtn = await waitForCreatePostSubmit(12000);
         if (!postBtn) {
-          throw new Error(
-            'Create post opened, but no Post button was found. Look for a blue Post button and tell me the exact label if it differs.'
+          const blocked = detectGroupPostBlocked();
+          await dismissStuckComposersOnly();
+          return skipResult(
+            blocked ||
+              `No Post button for “${group.name}” — skipped.`
           );
         }
         clickPostOnce(postBtn);
         postClicked = true;
 
         await reportStep("Waiting for Create post to close…");
-        const finished = await waitForShareFinished(12000);
-        // Even if close detection is flaky, do NOT retry — Post was already clicked
+        const finished = await waitForShareFinished(10000);
+        const afterBlock = detectGroupPostBlocked();
+        if (afterBlock) {
+          // May have been rejected after click — still don't retry this group
+          await dismissStuckComposersOnly();
+          return skipResult(afterBlock);
+        }
+
         if (!finished) {
           await reportStep(
             `Post clicked for “${group.name}” (dialog still open — not retrying to avoid duplicates).`
@@ -1093,22 +1148,24 @@
         return { ok: true, groupId: group.id, groupName: group.name };
       } catch (err) {
         if (postClicked) {
-          // Share likely already went through; retrying would duplicate
-          await reportStep(`Post already clicked for “${group.name}” — skipping retry.`);
+          // Share likely already went through; never retry this group
+          await reportStep(`Post already clicked for “${group.name}” — counting as done.`);
           return { ok: true, groupId: group.id, groupName: group.name };
         }
-        if (err.blocked || /challenge|captcha|blocked|suspended/i.test(err.message || "")) {
+        if (err.blocked || /challenge|captcha|blocked|suspended|checkpoint/i.test(err.message || "")) {
           return { ok: false, blocked: true, error: err.message };
         }
         await reportStep(err.message || String(err));
-        if (attempt >= MAX_STEP_ATTEMPTS) {
-          return { ok: false, blocked: false, error: err.message || String(err) };
+        try {
+          await dismissStuckComposersOnly();
+        } catch (_) {
+          /* ignore */
         }
-        await dismissLeftoverShareUi();
-        await sleep(600);
+        // Skip this group and let the queue continue
+        return skipResult(err.message || String(err));
       }
     }
-    return { ok: false, error: "Share failed after retries." };
+    return skipResult("Share failed — skipped.");
   }
 
   function ensureBanner() {
@@ -1196,7 +1253,9 @@
     } else {
       stopCountdown();
     }
-    meta.textContent = `${idx}/${total} queue · ${used}/${cap} today${eta}`;
+    const shared = session.sharesThisSession || 0;
+    const skipped = session.skippedThisSession || 0;
+    meta.textContent = `${idx}/${total} queue · shared ${shared} · skipped ${skipped} · ${used}/${cap} today${eta}`;
   }
 
   function ensureLauncher() {

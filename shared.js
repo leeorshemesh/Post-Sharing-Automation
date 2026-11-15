@@ -56,6 +56,8 @@ const FGS = (() => {
     currentGroupName: null,
     sharesThisSession: 0,
     sharesSinceBatch: 0,
+    skippedThisSession: 0,
+    skipped: [], // { id, name, reason }[]
     nextActionAt: null,
     waitReason: null,
     lastError: null,

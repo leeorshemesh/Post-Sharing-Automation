@@ -182,8 +182,45 @@ async function processNext() {
   if (!result || !result.ok) {
     const reason = (result && result.error) || "Share step failed";
     const blocked = result && result.blocked;
-    await FGS.saveSession({ lastError: reason });
-    await pauseSession(reason, blocked ? "blocked" : "paused");
+    const skip = result && result.skip;
+
+    // Hard stops only (checkpoint / captcha / tab lost). Everything else skips ahead.
+    if (blocked && !skip) {
+      await FGS.saveSession({ lastError: reason });
+      await pauseSession(reason, "blocked");
+      return;
+    }
+
+    const nextIndex = session.index + 1;
+    const skipped = Array.isArray(session.skipped) ? session.skipped.slice() : [];
+    skipped.push({ id: group.id, name: group.name, reason });
+    const skippedThisSession = (session.skippedThisSession || 0) + 1;
+
+    await FGS.saveSession({
+      index: nextIndex,
+      skipped,
+      skippedThisSession,
+      currentGroupId: null,
+      currentGroupName: null,
+      message: `Skipped ${group.name}: ${reason}`,
+      lastError: reason,
+      status: "running",
+    });
+    await broadcast({ type: "FGS_STATE" });
+
+    if (nextIndex >= session.queue.length) {
+      await finishSession(
+        `Done. Shared ${session.sharesThisSession || 0}, skipped ${skippedThisSession}.`
+      );
+      return;
+    }
+
+    // Brief pause then continue — do not count skips toward batch breaks
+    const delaySec = FGS.randomBetween(
+      Math.max(2, Math.min(settings.delayMinSec, 5)),
+      Math.max(3, Math.min(settings.delayMaxSec, 8))
+    );
+    await scheduleNext(delaySec * 1000, "inter_group");
     return;
   }
 
@@ -208,11 +245,16 @@ async function processNext() {
   }
 
   if (nextIndex >= session.queue.length) {
-    await finishSession("All selected groups processed.");
+    const skippedN = session.skippedThisSession || 0;
+    await finishSession(
+      skippedN
+        ? `Done. Shared ${sharesThisSession}, skipped ${skippedN}.`
+        : "All selected groups processed."
+    );
     return;
   }
 
-  // After a full batch, take a long break before the next share
+  // After a full batch, take a longer break before the next share
   if (sharesSinceBatch % settings.batchSize === 0) {
     const breakSec = FGS.randomBetween(settings.batchBreakMinSec, settings.batchBreakMaxSec);
     await FGS.saveSession({ sharesSinceBatch: 0 });
@@ -274,6 +316,8 @@ async function startSession({ groupIds, tabId, postUrl }) {
     currentGroupName: null,
     sharesThisSession: 0,
     sharesSinceBatch: 0,
+    skippedThisSession: 0,
+    skipped: [],
     nextActionAt: null,
     waitReason: null,
     lastError: null,

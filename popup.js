@@ -42,6 +42,8 @@
     if (session.queue?.length) {
       parts.push(`Queue ${session.index}/${session.queue.length}`);
     }
+    if (session.sharesThisSession) parts.push(`Shared ${session.sharesThisSession}`);
+    if (session.skippedThisSession) parts.push(`Skipped ${session.skippedThisSession}`);
     if (session.currentGroupName) parts.push(`Now: ${session.currentGroupName}`);
     if (session.status === "waiting" && session.nextActionAt) {
       const reason = session.waitReason === "batch_break" ? "Batch break" : "Next share";
