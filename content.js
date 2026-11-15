@@ -290,22 +290,18 @@
     return "other";
   }
 
-  function isDisposableShareUi(dlg) {
-    const kind = dialogKind(dlg);
-    return kind === "create_post" || kind === "share_sheet" || kind === "group_picker";
-  }
-
-  async function dismissLeftoverShareUi() {
-    // Only close share/group/create-post sheets. Never Escape (closes the post modal)
-    // and never click Close on the post viewer itself.
+  async function dismissDialogKinds(kinds) {
+    // Never Escape (closes the post modal). Never close the post viewer.
+    // By default we keep the Share to sheet open between groups.
+    const want = new Set(kinds);
     for (let i = 0; i < 3; i++) {
-      const targets = dialogs().filter(isDisposableShareUi);
+      const targets = dialogs().filter((d) => want.has(dialogKind(d)));
       if (!targets.length) break;
       let closed = false;
       for (const root of targets) {
         const close = findByLabel([/^close$/, /^dismiss$/], root, { maxLen: 40 });
         if (close && !isNavigatingLink(close)) {
-          click(close);
+          click(close, { once: true });
           closed = true;
           await sleep(400);
           break;
@@ -314,6 +310,16 @@
       if (!closed) break;
     }
     await sleep(200);
+  }
+
+  async function dismissLeftoverShareUi() {
+    // Full reset (retries only): close composers/pickers/sheets
+    await dismissDialogKinds(["create_post", "group_picker", "share_sheet"]);
+  }
+
+  async function dismissStuckComposersOnly() {
+    // Between groups: close Create post if stuck, keep Share to sheet
+    await dismissDialogKinds(["create_post"]);
   }
 
   function findPrimaryArticle() {
@@ -953,56 +959,76 @@
         }
 
         await reportStep(`Preparing share to “${group.name}” (try ${attempt}/${MAX_STEP_ATTEMPTS})…`);
-        // Only clear leftover share sheets — Escape/Close was exiting the post lightbox
-        await dismissLeftoverShareUi();
-        await sleep(400);
+        // Keep the Share to sheet between groups. Only clear a stuck Create post.
+        // Full dismiss only on retry after a failed attempt (below in catch).
+        if (attempt === 1) {
+          await dismissStuckComposersOnly();
+        } else {
+          await dismissLeftoverShareUi();
+        }
+        await sleep(300);
 
         if (location.href !== startUrl) {
           throw new Error("Left the original post page unexpectedly. Re-open the post and Resume.");
         }
 
-        // 1) Post screen → Share (arrow)
-        await reportStep("1/5 Clicking Share (arrow) on the post…");
-        const shareBtn = await waitFor(() => findShareButton(), { timeout: 12000 });
-        if (!shareBtn) {
-          throw new Error("Could not find the Share arrow on this post. Open the post and try again.");
-        }
-        if (!click(shareBtn)) {
-          throw new Error("Share control looked like a link that would leave this post — skipped it.");
-        }
+        // After the first successful share, Facebook leaves the Share to popup open.
+        // Re-clicking the Share arrow then fights that UI — skip it when the sheet is already up.
+        let surface = "need_share";
+        if (groupPickerVisible() && findGroupSearchInput()) {
+          surface = "group_picker";
+          await reportStep("1/5 Group picker already open — skipping Share arrow + Group");
+        } else if (shareSheetVisible() && findGroupUnderShareTo()) {
+          surface = "share_sheet";
+          await reportStep("1/5 Share to sheet already open — skipping Share arrow");
+        } else {
+          await reportStep("1/5 Clicking Share (arrow) on the post…");
+          const shareBtn = await waitFor(() => findShareButton(), { timeout: 12000 });
+          if (!shareBtn) {
+            throw new Error("Could not find the Share arrow on this post. Open the post and try again.");
+          }
+          if (!click(shareBtn, { once: true })) {
+            throw new Error("Share control looked like a link that would leave this post — skipped it.");
+          }
 
-        await reportStep("1/5 Waiting for Share to sheet…");
-        const sheet = await waitFor(() => shareSheetVisible(), { timeout: 12000 });
-        if (!sheet) {
-          throw new Error(
-            'Share sheet did not appear after clicking the Share arrow. Try clicking Share once manually to confirm it opens.'
+          await reportStep("1/5 Waiting for Share to sheet…");
+          const sheet = await waitFor(
+            () => shareSheetVisible() && findGroupUnderShareTo(),
+            { timeout: 12000 }
           );
-        }
-        await sleep(500);
-
-        if (location.href !== startUrl) {
-          throw new Error("Clicking Share navigated away from the post. Re-open the post and try again.");
-        }
-
-        // 2) Share sheet → under "Share to" → Group (people icon + caption)
-        await reportStep('2/5 Clicking “Group” (people icon) under Share to…');
-        const groupOpt = await waitFor(() => findGroupUnderShareTo(), { timeout: 12000 });
-        if (!groupOpt) {
-          throw new Error(
-            'Could not find the “Group” tile under “Share to”. Open Share manually once and confirm that row is there.'
-          );
-        }
-        const openedPicker = await clickGroupTile(groupOpt);
-        if (!openedPicker) {
-          // One more wait in case UI is slow
-          const late = await waitFor(() => groupPickerVisible(), { timeout: 5000 });
-          if (!late) {
+          if (!sheet) {
             throw new Error(
-              "Clicked Group but the group list/search never opened. The wrong control may have been targeted — try again after Reload."
+              'Share sheet did not appear after clicking the Share arrow. Try clicking Share once manually to confirm it opens.'
             );
           }
+          surface = "share_sheet";
+          await sleep(400);
+
+          if (location.href !== startUrl) {
+            throw new Error("Clicking Share navigated away from the post. Re-open the post and try again.");
+          }
         }
-        await sleep(600);
+
+        // 2) Share sheet → Group (skip if group picker is already open)
+        if (surface !== "group_picker") {
+          await reportStep('2/5 Clicking “Group” (people icon) under Share to…');
+          const groupOpt = await waitFor(() => findGroupUnderShareTo(), { timeout: 12000 });
+          if (!groupOpt) {
+            throw new Error(
+              'Could not find the “Group” tile under “Share to”. Open Share manually once and confirm that row is there.'
+            );
+          }
+          const openedPicker = await clickGroupTile(groupOpt);
+          if (!openedPicker) {
+            const late = await waitFor(() => groupPickerVisible(), { timeout: 5000 });
+            if (!late) {
+              throw new Error(
+                "Clicked Group but the group list/search never opened. The wrong control may have been targeted — try again after Reload."
+              );
+            }
+          }
+          await sleep(500);
+        }
 
         // 3) Group picker → search bar at top
         await reportStep(`3/5 Searching for “${group.name}”…`);
