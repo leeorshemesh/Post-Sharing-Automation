@@ -377,42 +377,71 @@
     return null;
   }
 
+  function scoreConfirmButton(el) {
+    const label = labelOf(el);
+    const aria = normalize(el.getAttribute("aria-label") || "");
+    const combined = label || aria;
+    if (!combined || combined.length > 48) return 0;
+    // Facebook's share-to-group composer uses "Share" (not always "Post")
+    if (/^(share|post|publish)$/.test(combined)) return 1000;
+    if (/^(share|post|publish)$/.test(aria)) return 1000;
+    if (/^share now$/.test(combined)) return 600;
+    return 0;
+  }
+
+  function findConfirmCandidates(root) {
+    const scored = findClickables(root)
+      .map((el) => ({ el, score: scoreConfirmButton(el) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+    return scored.map((x) => x.el);
+  }
+
   function findPostConfirmButton() {
     const roots = dialogs().length ? dialogs() : [document];
+    // Try every matching Share/Post control; don't stop at a disabled lookalike
     for (const root of roots) {
-      const btn = pickBest(findClickables(root), (el) => {
-        const label = labelOf(el);
-        if (!label || label.length > 40) return 0;
-        // Prefer Post inside the share-to-group composer
-        if (/^post$/.test(label)) return 1000;
-        if (/^share$/.test(label)) return 700;
-        if (/^publish$/.test(label)) return 800;
-        return 0;
-      });
-      if (btn) {
-        // Skip disabled-looking buttons
-        const ariaDisabled = elDisabled(btn);
-        if (!ariaDisabled) return btn;
+      for (const btn of findConfirmCandidates(root)) {
+        if (!looksUnusable(btn)) return btn;
+      }
+    }
+    // Last resort: any visible Share/Post text node inside a dialog
+    for (const root of roots) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      let node = walker.nextNode();
+      while (node) {
+        if (visible(node) && /^(share|post)$/.test(normalize(textOf(node))) && textOf(node).length <= 12) {
+          const clickable =
+            node.closest?.('[role="button"], button, [tabindex="0"]') || node;
+          if (visible(clickable) && !looksUnusable(clickable) && scoreConfirmButton(clickable) > 0) {
+            return clickable;
+          }
+          // Parent may not carry the label — still try clicking the closest button shell
+          if (visible(clickable) && !looksUnusable(clickable)) {
+            const parentLabel = labelOf(clickable);
+            if (!parentLabel || /share|post|publish/.test(parentLabel)) return clickable;
+          }
+        }
+        node = walker.nextNode();
       }
     }
     return null;
   }
 
-  function elDisabled(el) {
+  function looksUnusable(el) {
     if (!el) return true;
-    if (el.getAttribute("aria-disabled") === "true") return true;
     if (el.hasAttribute("disabled")) return true;
+    // Facebook sometimes leaves aria-disabled on controls that are still the right target;
+    // only treat as unusable if pointer events are none or it's clearly hidden.
     const style = window.getComputedStyle(el);
-    if (Number(style.opacity) < 0.5) return true;
+    if (style.pointerEvents === "none") return true;
+    if (style.visibility === "hidden" || style.display === "none") return true;
+    if (Number(style.opacity) === 0) return true;
     return false;
   }
 
-  async function waitForEnabledPost(timeout = 12000) {
-    return waitFor(() => {
-      const btn = findPostConfirmButton();
-      if (btn && !elDisabled(btn)) return btn;
-      return null;
-    }, { timeout });
+  async function waitForEnabledPost(timeout = 16000) {
+    return waitFor(() => findPostConfirmButton(), { timeout, interval: 300 });
   }
 
   async function runShareOnce(group) {
@@ -457,9 +486,16 @@
         click(result);
         await sleep(1200);
 
-        await reportStep("Clicking Post…");
-        const postBtn = await waitForEnabledPost(14000);
-        if (!postBtn) throw new Error("Could not find an enabled Post button after selecting the group.");
+        await reportStep("Clicking Share/Post…");
+        // Composer can take a moment after group selection before Share enables
+        await sleep(800);
+        const postBtn = await waitForEnabledPost(18000);
+        if (!postBtn) {
+          throw new Error(
+            'Could not find the final Share/Post button after selecting the group. If you see Share in the dialog, tell me the exact label text.'
+          );
+        }
+        await reportStep(`Clicking “${(postBtn.getAttribute("aria-label") || textOf(postBtn) || "Share").trim()}”…`);
         click(postBtn);
         await sleep(1800);
 
