@@ -127,7 +127,7 @@
     return true;
   }
 
-  function click(el, { allowSameOrigin = false } = {}) {
+  function click(el, { allowSameOrigin = false, once = false } = {}) {
     if (!el) return false;
     el.scrollIntoView({ block: "center", inline: "nearest" });
     flash(el);
@@ -135,9 +135,19 @@
     const x = rect.left + rect.width / 2;
     const y = rect.top + Math.min(Math.max(rect.height * 0.35, 12), rect.height - 8);
     if (!clickAt(el, x, y, { allowSameOrigin })) return false;
-    // Also try native click on non-anchor controls
-    if (typeof el.click === "function" && !el.closest?.("a[href]")) el.click();
+    // Native el.click() on top of dispatched events can double-fire Facebook actions
+    // (especially Post). Only use it when explicitly allowed.
+    if (!once && typeof el.click === "function" && !el.closest?.("a[href]")) el.click();
     return true;
+  }
+
+  function clickPostOnce(postBtn) {
+    // Exactly one click sequence — duplicates were causing multi-shares
+    flash(postBtn);
+    const pr = postBtn.getBoundingClientRect();
+    return clickAt(postBtn, pr.left + pr.width / 2, pr.top + pr.height / 2, {
+      allowSameOrigin: true,
+    });
   }
 
   async function clickGroupTile(tile) {
@@ -933,9 +943,15 @@
     if (challenge) return { ok: false, blocked: true, error: challenge };
 
     const startUrl = location.href;
+    let postClicked = false;
 
     for (let attempt = 1; attempt <= MAX_STEP_ATTEMPTS; attempt++) {
       try {
+        // Never re-run the flow after Post was clicked — that caused duplicate shares
+        if (postClicked) {
+          return { ok: true, groupId: group.id, groupName: group.name };
+        }
+
         await reportStep(`Preparing share to “${group.name}” (try ${attempt}/${MAX_STEP_ATTEMPTS})…`);
         // Only clear leftover share sheets — Escape/Close was exiting the post lightbox
         await dismissLeftoverShareUi();
@@ -1018,7 +1034,7 @@
           );
         }
 
-        await reportStep("5/5 Clicking Post…");
+        await reportStep("5/5 Clicking Post (once)…");
         await sleep(600);
         const postBtn = await waitForCreatePostSubmit(20000);
         if (!postBtn) {
@@ -1026,29 +1042,31 @@
             'Create post opened, but no Post button was found. Look for a blue Post button and tell me the exact label if it differs.'
           );
         }
-        flash(postBtn);
-        // Hit the blue control center — caption spans often aren't the real button
-        const pr = postBtn.getBoundingClientRect();
-        clickAt(postBtn, pr.left + pr.width / 2, pr.top + pr.height / 2, {
-          allowSameOrigin: true,
-        });
-        click(postBtn, { allowSameOrigin: true });
+        clickPostOnce(postBtn);
+        postClicked = true;
 
         await reportStep("Waiting for Create post to close…");
         const finished = await waitForShareFinished(12000);
+        // Even if close detection is flaky, do NOT retry — Post was already clicked
         if (!finished) {
-          throw new Error(
-            "Create post stayed open after clicking Post — the share may not have gone through."
+          await reportStep(
+            `Post clicked for “${group.name}” (dialog still open — not retrying to avoid duplicates).`
           );
+        } else {
+          await reportStep(`Shared to “${group.name}”.`);
         }
 
         const after = detectChallenge();
         if (after) return { ok: false, blocked: true, error: after };
 
-        await reportStep(`Shared to “${group.name}”.`);
         await sleep(400);
         return { ok: true, groupId: group.id, groupName: group.name };
       } catch (err) {
+        if (postClicked) {
+          // Share likely already went through; retrying would duplicate
+          await reportStep(`Post already clicked for “${group.name}” — skipping retry.`);
+          return { ok: true, groupId: group.id, groupName: group.name };
+        }
         if (err.blocked || /challenge|captcha|blocked|suspended/i.test(err.message || "")) {
           return { ok: false, blocked: true, error: err.message };
         }
