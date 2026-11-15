@@ -16,27 +16,33 @@ const FGS = (() => {
     },
   };
 
-  // Still paced like a careful human, but not glacial.
-  // ~40–75s between groups + short break every 12 ≈ ~1.5–2.5h for 100 shares.
-  const SETTINGS_REVISION = 2;
+  // User-tuned pacing: short gaps between shares, brief pause every 10.
+  const SETTINGS_REVISION = 3;
   const DEFAULT_SETTINGS = {
     settingsRevision: SETTINGS_REVISION,
-    delayMinSec: 40,
-    delayMaxSec: 75,
-    batchSize: 12,
-    batchBreakMinSec: 3 * 60,
-    batchBreakMaxSec: 6 * 60,
+    delayMinSec: 5,
+    delayMaxSec: 10,
+    batchSize: 10,
+    batchBreakMinSec: 25,
+    batchBreakMaxSec: 35,
     dailyCap: 100,
   };
 
-  function isLegacyV1Timing(settings) {
-    if (!settings) return false;
-    return (
-      settings.delayMinSec === 90 &&
-      settings.delayMaxSec === 180 &&
-      settings.batchSize === 10 &&
-      settings.batchBreakMinSec === 8 * 60 &&
-      settings.batchBreakMaxSec === 15 * 60
+  function isMigratableTiming(settings) {
+    if (!settings) return true;
+    const packs = [
+      // v1
+      { delayMinSec: 90, delayMaxSec: 180, batchSize: 10, batchBreakMinSec: 480, batchBreakMaxSec: 900 },
+      // v2
+      { delayMinSec: 40, delayMaxSec: 75, batchSize: 12, batchBreakMinSec: 180, batchBreakMaxSec: 360 },
+    ];
+    return packs.some(
+      (p) =>
+        settings.delayMinSec === p.delayMinSec &&
+        settings.delayMaxSec === p.delayMaxSec &&
+        settings.batchSize === p.batchSize &&
+        settings.batchBreakMinSec === p.batchBreakMinSec &&
+        settings.batchBreakMaxSec === p.batchBreakMaxSec
     );
   }
 
@@ -154,9 +160,9 @@ const FGS = (() => {
     const { settings } = await getStorage(["settings"]);
     let merged = { ...DEFAULT_SETTINGS, ...(settings || {}) };
 
-    // One-time migrate from the original slow defaults (keep custom user timings)
+    // Migrate shipped default packs to the latest pacing (keep true custom timings)
     const rev = settings?.settingsRevision || 0;
-    if (rev < SETTINGS_REVISION && (!settings || isLegacyV1Timing(settings))) {
+    if (rev < SETTINGS_REVISION && isMigratableTiming(settings)) {
       merged = {
         ...merged,
         delayMinSec: DEFAULT_SETTINGS.delayMinSec,
