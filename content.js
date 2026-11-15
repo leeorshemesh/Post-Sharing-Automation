@@ -751,46 +751,145 @@
   }
 
   function findCreatePostDialog() {
-    const all = dialogs();
-    return all.find(isCreatePostDialog) || null;
+    const byRole = dialogs().find(isCreatePostDialog);
+    if (byRole) return byRole;
+
+    // Create post is sometimes a layer without role="dialog"
+    for (const label of findExactTextNodes("Create post", document)) {
+      let scope = label.parentElement;
+      for (let i = 0; i < 10 && scope; i++) {
+        const rect = scope.getBoundingClientRect();
+        if (rect.width > 280 && rect.height > 200 && isCreatePostDialog(scope)) return scope;
+        if (rect.width > 280 && rect.height > 200) {
+          const t = normalize(textOf(scope)).slice(0, 400);
+          if (/create post/.test(t) || /say something about this/.test(t)) return scope;
+        }
+        scope = scope.parentElement;
+      }
+    }
+    return null;
   }
 
-  function scoreCreatePostButton(el) {
-    const label = labelOf(el);
-    const aria = normalize(el.getAttribute("aria-label") || "");
-    const combined = label || aria;
-    if (!combined || combined.length > 40) return 0;
-    // Final step in "Create post" is Post (not the earlier Share arrow)
-    if (/^post$/.test(combined) || /^post$/.test(aria)) return 1000;
-    if (/^publish$/.test(combined)) return 800;
-    // Only accept Share here as a weak fallback
-    if (/^share$/.test(combined)) return 400;
-    return 0;
+  function isFacebookBlueButton(el) {
+    const style = window.getComputedStyle(el);
+    const bg = style.backgroundColor || "";
+    const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+    if (!m) return false;
+    const r = Number(m[1]);
+    const g = Number(m[2]);
+    const b = Number(m[3]);
+    // FB primary blue ~ rgb(24, 119, 242) and close variants
+    return r >= 0 && r <= 80 && g >= 90 && g <= 170 && b >= 200 && b <= 255;
+  }
+
+  function postButtonLooksClickable(el) {
+    if (!el || !visible(el)) return false;
+    if (el.hasAttribute("disabled")) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    if (Number(style.opacity) === 0) return false;
+    // Do NOT reject aria-disabled — FB often leaves it set while the blue Post is usable
+    return true;
+  }
+
+  function resolvePostControl(labelEl) {
+    if (!labelEl) return null;
+    const candidates = [];
+    const direct = clickableAncestor(labelEl);
+    if (direct) candidates.push(direct);
+
+    let scope = labelEl.parentElement;
+    for (let depth = 0; depth < 6 && scope; depth++) {
+      candidates.push(scope);
+      const inner = scope.querySelector?.(
+        '[role="button"], button, [tabindex="0"], a[href]'
+      );
+      if (inner) candidates.push(inner);
+      scope = scope.parentElement;
+    }
+
+    // Prefer compact blue controls near the caption
+    const ranked = [...new Set(candidates)]
+      .filter(postButtonLooksClickable)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        let score = 0;
+        if (rect.width >= 40 && rect.width <= 280 && rect.height >= 24 && rect.height <= 80) {
+          score += 50;
+        }
+        if (isFacebookBlueButton(el)) score += 100;
+        const aria = normalize(el.getAttribute("aria-label") || "");
+        const label = labelOf(el);
+        if (aria === "post" || label === "post" || normalize(textOf(el)) === "post") score += 80;
+        if (el.getAttribute("role") === "button" || el.tagName === "BUTTON") score += 20;
+        // Prefer lower on screen (footer)
+        score += Math.min(40, Math.floor(rect.top / 40));
+        return { el, score, rect };
+      })
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    return ranked[0]?.el || null;
   }
 
   function findCreatePostSubmitButton() {
     const createDlg = findCreatePostDialog();
-    const roots = createDlg ? [createDlg] : dialogs().length ? dialogs() : [];
-    for (const root of roots) {
-      const candidates = findClickables(root)
-        .map((el) => ({ el, score: scoreCreatePostButton(el) }))
-        .filter((x) => x.score > 0)
-        .sort((a, b) => b.score - a.score);
-      for (const { el } of candidates) {
-        if (!looksUnusable(el)) return el;
+    const roots = [];
+    if (createDlg) {
+      roots.push(createDlg);
+      if (createDlg.parentElement) roots.push(createDlg.parentElement);
+    }
+    for (const d of dialogs()) {
+      if (isCreatePostDialog(d)) roots.push(d);
+    }
+    // Footer actions are sometimes portaled beside the dialog
+    if (createDlg || findExactTextNodes("Create post", document).length) {
+      roots.push(document.body);
+    }
+
+    for (const root of [...new Set(roots.filter(Boolean))]) {
+      // 1) Caption / aria "Post"
+      for (const labelEl of findExactTextNodes("Post", root)) {
+        // Ignore "Create post" heading matches — exact text "Post" only from findExactTextNodes
+        const btn = resolvePostControl(labelEl);
+        if (btn) return btn;
       }
 
-      // Text-node fallback: visible "Post" label inside Create post
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-      let node = walker.nextNode();
-      while (node) {
-        const raw = textOf(node);
-        if (visible(node) && normalize(raw) === "post" && raw.length <= 8) {
-          const clickable =
-            node.closest?.('[role="button"], button, [tabindex="0"]') || node;
-          if (visible(clickable) && !looksUnusable(clickable)) return clickable;
-        }
-        node = walker.nextNode();
+      const ariaPosts = [
+        ...queryAll('[aria-label="Post" i]', root),
+        ...queryAll('[aria-label="post" i]', root),
+      ].filter(postButtonLooksClickable);
+      if (ariaPosts[0]) return ariaPosts[0];
+
+      // 2) Blue primary button in the create-post surface
+      const scope = createDlg || root;
+      const blues = findClickables(scope)
+        .filter(postButtonLooksClickable)
+        .filter(isFacebookBlueButton)
+        .filter((el) => {
+          const t = normalize(textOf(el));
+          const aria = normalize(el.getAttribute("aria-label") || "");
+          return t === "post" || aria === "post" || t.length <= 12;
+        });
+      if (blues.length) {
+        blues.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+        return blues[0];
+      }
+
+      // 3) Any blue button in the lower half of the create dialog
+      if (createDlg && root === createDlg) {
+        const dlgRect = createDlg.getBoundingClientRect();
+        const midY = dlgRect.top + dlgRect.height * 0.55;
+        const footerBlues = findClickables(createDlg)
+          .filter(postButtonLooksClickable)
+          .filter(isFacebookBlueButton)
+          .filter((el) => el.getBoundingClientRect().top >= midY);
+        if (footerBlues.length === 1) return footerBlues[0];
+        const named = footerBlues.find((el) => {
+          const t = normalize(textOf(el) + " " + (el.getAttribute("aria-label") || ""));
+          return /\bpost\b/.test(t);
+        });
+        if (named) return named;
       }
     }
     return null;
@@ -920,12 +1019,19 @@
         }
 
         await reportStep("5/5 Clicking Post…");
-        const postBtn = await waitForCreatePostSubmit(18000);
+        await sleep(600);
+        const postBtn = await waitForCreatePostSubmit(20000);
         if (!postBtn) {
           throw new Error(
             'Create post opened, but no Post button was found. Look for a blue Post button and tell me the exact label if it differs.'
           );
         }
+        flash(postBtn);
+        // Hit the blue control center — caption spans often aren't the real button
+        const pr = postBtn.getBoundingClientRect();
+        clickAt(postBtn, pr.left + pr.width / 2, pr.top + pr.height / 2, {
+          allowSameOrigin: true,
+        });
         click(postBtn, { allowSameOrigin: true });
 
         await reportStep("Waiting for Create post to close…");
