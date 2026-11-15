@@ -28,7 +28,9 @@
   }
 
   function normalize(s) {
+    // NFC keeps Hebrew/combined characters comparable; toLowerCase is a no-op for Hebrew
     return String(s || "")
+      .normalize("NFC")
       .toLowerCase()
       .replace(/\s+/g, " ")
       .trim();
@@ -689,6 +691,8 @@
   }
 
   async function clearAndType(el, text) {
+    // Works for English and Hebrew (and mixed). Prefer insertText over fake key Codes.
+    const value = String(text || "").normalize("NFC");
     el.focus();
     await sleep(120);
 
@@ -700,42 +704,36 @@
       sel.addRange(range);
       document.execCommand("delete", false);
       await sleep(80);
-      for (const ch of text) {
-        document.execCommand("insertText", false, ch);
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch, inputType: "insertText" }));
-        await sleep(18 + Math.floor(Math.random() * 28));
-      }
+      document.execCommand("insertText", false, value);
+      el.dispatchEvent(
+        new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" })
+      );
+      await sleep(200);
       return;
     }
 
-    // React-friendly value set
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-    setter?.call(el, "");
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    await sleep(80);
-
-    // Select-all + delete, then type char by char
     el.dispatchEvent(
       new KeyboardEvent("keydown", { key: "a", code: "KeyA", ctrlKey: true, bubbles: true })
     );
     setter?.call(el, "");
     el.value = "";
     el.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(80);
 
-    let built = "";
-    for (const ch of text) {
-      built += ch;
-      el.dispatchEvent(
-        new KeyboardEvent("keydown", { key: ch, bubbles: true, cancelable: true })
-      );
-      setter?.call(el, built);
-      el.value = built;
-      el.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch, inputType: "insertText" }));
-      el.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
-      await sleep(18 + Math.floor(Math.random() * 28));
-    }
+    // Set full Unicode string at once (reliable for Hebrew), then notify React
+    setter?.call(el, value);
+    el.value = value;
+    el.dispatchEvent(
+      new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" })
+    );
     el.dispatchEvent(new Event("change", { bubbles: true }));
-    await sleep(200);
+    // Fallback if FB ignored the value set
+    if ((el.value || "") !== value) {
+      document.execCommand("selectAll", false);
+      document.execCommand("insertText", false, value);
+    }
+    await sleep(250);
   }
 
   function findGroupResult(groupName) {
