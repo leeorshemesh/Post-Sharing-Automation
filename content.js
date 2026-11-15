@@ -284,7 +284,11 @@
     if (/search (for )?groups|suggested groups|all groups/.test(text)) return "group_picker";
     // Post opened as a lightbox/modal — must never close this
     if (dlg.querySelector?.('[role="article"]')) return "post_viewer";
-    if (/photo|video|reel|post/.test(label) && dlg.querySelector?.('[aria-label*="Like" i], [aria-label="Share" i], [aria-label*="Comment" i]')) {
+    if (
+      /photo|video|reel|post/.test(label) &&
+      (dlg.querySelector?.('[aria-label*="Like"], [aria-label="Share"], [aria-label*="Comment"]') ||
+        dlg.querySelector?.('[aria-label*="like"], [aria-label="share"], [aria-label*="comment"]'))
+    ) {
       return "post_viewer";
     }
     return "other";
@@ -523,8 +527,8 @@
       // A) aria-label="Group" on the icon button (common for the 3-people glyph)
       const ariaGroup = pickBest(
         [
-          ...queryAll('[aria-label="Group" i]', root),
-          ...queryAll('[aria-label="group" i]', root),
+          ...queryAll('[aria-label="Group"]', root),
+          ...queryAll('[aria-label="group"]', root),
           ...findClickables(root),
           ...queryAll('[role="link"]', root),
           ...queryAll("a[href]", root),
@@ -872,8 +876,8 @@
       }
 
       const ariaPosts = [
-        ...queryAll('[aria-label="Post" i]', root),
-        ...queryAll('[aria-label="post" i]', root),
+        ...queryAll('[aria-label="Post"]', root),
+        ...queryAll('[aria-label="post"]', root),
       ].filter(postButtonLooksClickable);
       if (ariaPosts[0]) return ariaPosts[0];
 
