@@ -489,8 +489,8 @@
       ...dialogs(),
       ...queryAll('[role="menu"]'),
       ...queryAll('[role="listbox"]'),
-      ...queryAll('[aria-label*="Share" i]'),
-      ...queryAll('[aria-label*="share" i]'),
+      ...queryAll('[aria-label*="Share"]'),
+      ...queryAll('[aria-label*="share"]'),
     ].filter(visible);
 
     // Popover often has no dialog role — climb from "Share to" or a Group caption
