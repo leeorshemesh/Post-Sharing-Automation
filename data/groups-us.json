@@ -1,0 +1,6 @@
+{
+  "id": "us",
+  "name": "Whole US",
+  "description": "Fixed set of US-wide Facebook groups (max 100). Edit this file or use the extension UI.",
+  "groups": []
+}

@@ -1,0 +1,99 @@
+#fgs-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483646;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+#fgs-launch {
+  background: #1877f2;
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+#fgs-launch:hover {
+  background: #166fe5;
+}
+
+#fgs-launch:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+#fgs-banner {
+  position: fixed;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  z-index: 2147483647;
+  max-width: min(720px, calc(100vw - 24px));
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+#fgs-banner .fgs-banner-inner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  background: #1c1e21;
+  color: #f5f6f7;
+  border-radius: 12px;
+  padding: 10px 14px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+}
+
+#fgs-banner .fgs-banner-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+#fgs-banner[data-status="blocked"] .fgs-banner-inner,
+#fgs-banner[data-status="paused"] .fgs-banner-inner {
+  background: #6b3a00;
+}
+
+#fgs-banner[data-status="done"] .fgs-banner-inner {
+  background: #0e5c2f;
+}
+
+#fgs-banner[data-status="waiting"] .fgs-banner-inner {
+  background: #1b3a5f;
+}
+
+#fgs-banner .fgs-banner-msg {
+  flex: 1 1 180px;
+  opacity: 0.95;
+}
+
+#fgs-banner .fgs-banner-meta {
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+#fgs-banner .fgs-banner-actions {
+  display: flex;
+  gap: 6px;
+}
+
+#fgs-banner .fgs-banner-actions button {
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: transparent;
+  color: #fff;
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+#fgs-banner .fgs-banner-actions button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}

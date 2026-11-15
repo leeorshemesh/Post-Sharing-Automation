@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Facebook Group Share</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Group Share</h1>
+      <p class="sub">Semi-auto · daily cap · human-like delays</p>
+    </header>
+
+    <section class="card" id="status-card">
+      <div class="row between">
+        <strong id="status-label">Idle</strong>
+        <span id="day-count">0 / 100 today</span>
+      </div>
+      <p id="status-message" class="muted">Add groups, open a Facebook post, then Start.</p>
+      <p id="status-meta" class="muted small"></p>
+      <div class="actions">
+        <button type="button" id="btn-start" class="primary">Start</button>
+        <button type="button" id="btn-pause">Pause</button>
+        <button type="button" id="btn-resume">Resume</button>
+        <button type="button" id="btn-skip">Skip wait</button>
+        <button type="button" id="btn-stop" class="danger">Stop</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Group set</h2>
+      <div class="set-switch" role="group" aria-label="Group set">
+        <button type="button" class="set-btn" data-set="california" id="set-california">California</button>
+        <button type="button" class="set-btn" data-set="us" id="set-us">Whole US</button>
+      </div>
+      <p id="set-meta" class="muted small">Same fixed list every run (max 100).</p>
+      <div class="actions">
+        <button type="button" id="btn-reset-set">Reset to file</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="row between">
+        <h2>Groups <span id="group-count" class="muted"></span></h2>
+        <label class="check">
+          <input type="checkbox" id="select-all" checked />
+          All enabled
+        </label>
+      </div>
+      <form id="add-form" class="add-form">
+        <input type="text" id="group-name" placeholder="Group name" required />
+        <input type="text" id="group-url" placeholder="https://www.facebook.com/groups/…" />
+        <button type="submit" class="primary">Add</button>
+      </form>
+      <details class="import">
+        <summary>Paste import (name | url per line)</summary>
+        <textarea id="import-text" rows="5" placeholder="Buy Sell Local | https://www.facebook.com/groups/123&#10;https://www.facebook.com/groups/another"></textarea>
+        <button type="button" id="btn-import" class="primary">Import</button>
+      </details>
+      <ul id="group-list" class="group-list"></ul>
+      <p id="group-empty" class="muted small">No groups yet. Edit <code>data/groups-*.json</code> or import below.</p>
+    </section>
+
+    <section class="card">
+      <h2>Safe defaults</h2>
+      <form id="settings-form" class="settings">
+        <label>
+          Delay min (sec)
+          <input type="number" id="delay-min" min="30" max="600" />
+        </label>
+        <label>
+          Delay max (sec)
+          <input type="number" id="delay-max" min="30" max="900" />
+        </label>
+        <label>
+          Batch size
+          <input type="number" id="batch-size" min="1" max="50" />
+        </label>
+        <label>
+          Batch break min (sec)
+          <input type="number" id="batch-break-min" min="60" max="3600" />
+        </label>
+        <label>
+          Batch break max (sec)
+          <input type="number" id="batch-break-max" min="60" max="7200" />
+        </label>
+        <label>
+          Daily cap
+          <input type="number" id="daily-cap" min="1" max="100" />
+        </label>
+        <button type="submit" class="primary">Save settings</button>
+      </form>
+      <p class="muted small warn">
+        Raising speed or skipping breaks increases ban risk. Keep the Facebook post tab open while a session runs.
+      </p>
+    </section>
+
+    <script src="shared.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>
