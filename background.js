@@ -367,6 +367,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       }
+      case "FGS_STEP": {
+        if (message.message) {
+          await FGS.saveSession({ message: message.message });
+          await broadcast({ type: "FGS_STATE" });
+        }
+        sendResponse({ ok: true });
+        break;
+      }
       case "FGS_ACTIVATE_SET": {
         const session = await FGS.getSession();
         if (session.status === "running" || session.status === "waiting") {

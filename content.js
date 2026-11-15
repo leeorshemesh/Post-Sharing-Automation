@@ -5,6 +5,9 @@
   const PANEL_ID = "fgs-panel";
   const MAX_STEP_ATTEMPTS = 2;
 
+  let lastState = null;
+  let countdownTimer = null;
+
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
   }
@@ -12,11 +15,11 @@
   function visible(el) {
     if (!el) return false;
     const style = window.getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
       return false;
     }
     const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+    return rect.width > 2 && rect.height > 2;
   }
 
   function textOf(el) {
@@ -30,12 +33,38 @@
       .trim();
   }
 
+  function labelOf(el) {
+    if (!el) return "";
+    return normalize(
+      el.getAttribute?.("aria-label") ||
+        el.getAttribute?.("title") ||
+        el.getAttribute?.("placeholder") ||
+        textOf(el)
+    );
+  }
+
+  async function reportStep(message) {
+    try {
+      await chrome.runtime.sendMessage({ type: "FGS_STEP", message });
+    } catch (_) {
+      /* ignore */
+    }
+    const banner = document.getElementById(BANNER_ID);
+    const msg = banner?.querySelector?.(".fgs-banner-msg");
+    if (msg) msg.textContent = message;
+  }
+
   function click(el) {
     if (!el) return false;
     el.scrollIntoView({ block: "center", inline: "nearest" });
-    const opts = { bubbles: true, cancelable: true, view: window };
-    el.dispatchEvent(new PointerEvent("pointerdown", opts));
-    el.dispatchEvent(new MouseEvent("mousedown", opts));
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + Math.min(rect.width / 2, 20);
+    const y = rect.top + Math.min(rect.height / 2, 12);
+    const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+    el.dispatchEvent(new PointerEvent("pointerover", opts));
+    el.dispatchEvent(new MouseEvent("mouseover", opts));
+    el.dispatchEvent(new PointerEvent("pointerdown", { ...opts, buttons: 1 }));
+    el.dispatchEvent(new MouseEvent("mousedown", { ...opts, buttons: 1 }));
     el.dispatchEvent(new PointerEvent("pointerup", opts));
     el.dispatchEvent(new MouseEvent("mouseup", opts));
     el.dispatchEvent(new MouseEvent("click", opts));
@@ -43,47 +72,70 @@
     return true;
   }
 
-  function queryAllDeep(selector, root = document) {
-    const results = [];
-    const visit = (node) => {
-      if (!node) return;
-      if (node.querySelectorAll) {
-        results.push(...node.querySelectorAll(selector));
-      }
-      const tree = node.querySelectorAll?.("*") || [];
-      for (const el of tree) {
-        if (el.shadowRoot) visit(el.shadowRoot);
-      }
-    };
-    visit(root);
-    return results;
-  }
-
-  function findByRoleAndName(role, nameRe, root = document) {
-    const nodes = queryAllDeep(`[role="${role}"]`, root);
-    return nodes.find((el) => visible(el) && nameRe.test(normalize(el.getAttribute("aria-label") || textOf(el))));
-  }
-
-  function findClickableByText(patterns, root = document) {
-    const list = Array.isArray(patterns) ? patterns : [patterns];
-    const candidates = [
-      ...queryAllDeep('[role="button"]', root),
-      ...queryAllDeep("div[tabindex='0']", root),
-      ...queryAllDeep("span[role='button']", root),
-      ...queryAllDeep("a[role='link']", root),
-      ...queryAllDeep("button", root),
-    ];
-    for (const el of candidates) {
-      if (!visible(el)) continue;
-      const label = normalize(el.getAttribute("aria-label") || textOf(el));
-      if (!label || label.length > 80) continue;
-      if (list.some((re) => re.test(label))) return el;
+  function queryAll(selector, root = document) {
+    try {
+      return [...(root.querySelectorAll?.(selector) || [])];
+    } catch (_) {
+      return [];
     }
-    return null;
+  }
+
+  function dialogs() {
+    return queryAll('[role="dialog"]').filter(visible);
+  }
+
+  function menus() {
+    return [
+      ...queryAll('[role="menu"]'),
+      ...queryAll('[role="listbox"]'),
+      ...dialogs(),
+    ].filter(visible);
+  }
+
+  function findClickables(root = document) {
+    return [
+      ...queryAll('[role="button"]', root),
+      ...queryAll('[role="menuitem"]', root),
+      ...queryAll('[role="menuitemradio"]', root),
+      ...queryAll('[role="option"]', root),
+      ...queryAll('[role="link"]', root),
+      ...queryAll("div[tabindex='0']", root),
+      ...queryAll("span[role='button']", root),
+      ...queryAll("button", root),
+      ...queryAll("a[href]", root),
+    ].filter(visible);
+  }
+
+  function pickBest(candidates, scoreFn) {
+    let best = null;
+    let bestScore = 0;
+    for (const el of candidates) {
+      const score = scoreFn(el);
+      if (score > bestScore) {
+        best = el;
+        bestScore = score;
+      }
+    }
+    return bestScore > 0 ? best : null;
+  }
+
+  function findByLabel(patterns, root = document, { maxLen = 100 } = {}) {
+    const list = Array.isArray(patterns) ? patterns : [patterns];
+    return pickBest(findClickables(root), (el) => {
+      const label = labelOf(el);
+      if (!label || label.length > maxLen) return 0;
+      for (const re of list) {
+        if (re.test(label)) {
+          // Prefer shorter, more specific controls
+          return 1000 - Math.min(label.length, 200) + (el.getAttribute("role") === "menuitem" ? 50 : 0);
+        }
+      }
+      return 0;
+    });
   }
 
   function detectChallenge() {
-    const bodyText = normalize(document.body?.innerText?.slice(0, 8000) || "");
+    const bodyText = normalize(document.body?.innerText?.slice(0, 10000) || "");
     const checks = [
       /enter the characters you see/i,
       /security check/i,
@@ -93,19 +145,16 @@
       /your account has been disabled/i,
       /try again later/i,
       /temporarily blocked/i,
-      /checkpoint/i,
+      /you can't use this feature/i,
       /captcha/i,
     ];
     if (checks.some((re) => re.test(bodyText))) {
       return "Facebook showed a security or rate-limit challenge. Complete it manually, then Resume.";
     }
-    if (document.querySelector('iframe[src*="captcha"], iframe[title*="captcha" i]')) {
-      return "CAPTCHA detected. Complete it manually, then Resume.";
-    }
     return null;
   }
 
-  async function waitFor(fn, { timeout = 12000, interval = 300 } = {}) {
+  async function waitFor(fn, { timeout = 14000, interval = 250 } = {}) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
       const challenge = detectChallenge();
@@ -122,120 +171,248 @@
   }
 
   async function closeOpenDialogs() {
-    for (let i = 0; i < 3; i++) {
-      const close =
-        findClickableByText([/^close$/, /^dismiss$/]) ||
-        findByRoleAndName("button", /^close$/);
-      if (!close) break;
-      click(close);
-      await sleep(400);
+    for (let i = 0; i < 4; i++) {
+      const roots = [...dialogs(), document];
+      let closed = false;
+      for (const root of roots) {
+        const close = findByLabel([/^close$/, /^dismiss$/, /^cancel$/], root, { maxLen: 40 });
+        if (close) {
+          click(close);
+          closed = true;
+          await sleep(350);
+          break;
+        }
+      }
+      if (!closed) break;
     }
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    await sleep(300);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true }));
+    await sleep(250);
+  }
+
+  function findPrimaryArticle() {
+    const articles = queryAll('[role="article"]').filter(visible);
+    if (!articles.length) return null;
+    // Prefer the article closest to the vertical center / top of viewport with a Share control
+    const ranked = articles
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const dist = Math.abs(rect.top - 120);
+        return { el, dist, hasShare: Boolean(findShareInRoot(el)) };
+      })
+      .sort((a, b) => Number(b.hasShare) - Number(a.hasShare) || a.dist - b.dist);
+    return ranked[0]?.el || articles[0];
+  }
+
+  function findShareInRoot(root) {
+    return pickBest(findClickables(root), (el) => {
+      const label = labelOf(el);
+      const aria = normalize(el.getAttribute("aria-label") || "");
+      if (!label && !aria) return 0;
+      // Avoid "Share to a group" here — that's the menu item later
+      if (/share to (a )?group|share now|share to feed|share to your story/.test(label)) return 0;
+      if (/^share$/.test(label) || /^share$/.test(aria)) return 900;
+      if (aria === "share" || label === "share") return 950;
+      if (/\bshare\b/.test(aria) && aria.length < 40) return 700;
+      if (label === "send") return 400;
+      return 0;
+    });
   }
 
   function findShareButton() {
-    // Prefer Share near the article/feed unit in view
-    const articles = [...document.querySelectorAll('[role="article"]')].filter(visible);
-    const scopes = articles.length ? articles : [document];
-    for (const scope of scopes) {
-      const btn =
-        findClickableByText([/^share$/, /^send$/], scope) ||
-        findByRoleAndName("button", /^share$/, scope);
+    const article = findPrimaryArticle();
+    if (article) {
+      const btn = findShareInRoot(article);
       if (btn) return btn;
     }
-    return (
-      findClickableByText([/^share$/]) ||
-      findByRoleAndName("button", /^share$/)
-    );
+    return findShareInRoot(document);
   }
 
   function findShareToGroupOption() {
-    return (
-      findClickableByText([
-        /share to (a )?group/,
-        /^group$/,
-        /share in a group/,
-        /post to a group/,
-      ]) || findByRoleAndName("menuitem", /group/)
+    const roots = menus().length ? menus() : [document];
+    for (const root of roots) {
+      const hit = findByLabel(
+        [
+          /share to (a )?group/,
+          /share in (a )?group/,
+          /post to (a )?group/,
+          /^group$/,
+        ],
+        root,
+        { maxLen: 80 }
+      );
+      if (hit) return hit;
+    }
+    return findByLabel(
+      [/share to (a )?group/, /share in (a )?group/, /^group$/],
+      document,
+      { maxLen: 80 }
     );
   }
 
   function findGroupSearchInput() {
-    const dialogs = queryAllDeep('[role="dialog"]');
-    const roots = dialogs.length ? dialogs : [document];
+    const roots = dialogs().length ? dialogs() : [document];
     for (const root of roots) {
       const inputs = [
-        ...queryAllDeep('input[type="search"]', root),
-        ...queryAllDeep('input[type="text"]', root),
-        ...queryAllDeep('[contenteditable="true"]', root),
-        ...queryAllDeep('input[aria-label]', root),
+        ...queryAll('input[type="search"]', root),
+        ...queryAll('input[type="text"]', root),
+        ...queryAll("input:not([type])", root),
+        ...queryAll('[contenteditable="true"]', root),
+        ...queryAll("input", root),
       ].filter(visible);
-      const match = inputs.find((el) => {
-        const label = normalize(el.getAttribute("aria-label") || el.getAttribute("placeholder") || "");
-        return /search|group/.test(label) || el.getAttribute("type") === "search";
+
+      const scored = pickBest(inputs, (el) => {
+        const label = normalize(
+          el.getAttribute("aria-label") || el.getAttribute("placeholder") || ""
+        );
+        if (/search (for )?groups|group name|search groups/.test(label)) return 1000;
+        if (/search/.test(label)) return 800;
+        if (el.getAttribute("type") === "search") return 700;
+        if (/group/.test(label)) return 600;
+        return 100;
       });
-      if (match) return match;
-      if (inputs[0]) return inputs[0];
+      if (scored) return scored;
     }
     return null;
   }
 
-  async function typeInto(el, text) {
+  async function clearAndType(el, text) {
     el.focus();
+    await sleep(120);
+
     if (el.isContentEditable) {
-      el.textContent = "";
-      el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
-      document.execCommand?.("selectAll", false);
-      document.execCommand?.("insertText", false, text);
-    } else {
-      const proto = Object.getPrototypeOf(el);
-      const desc = Object.getOwnPropertyDescriptor(proto, "value");
-      if (desc && desc.set) desc.set.call(el, text);
-      else el.value = text;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.execCommand("delete", false);
+      await sleep(80);
+      for (const ch of text) {
+        document.execCommand("insertText", false, ch);
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch, inputType: "insertText" }));
+        await sleep(35 + Math.floor(Math.random() * 40));
+      }
+      return;
     }
-    await sleep(500);
+
+    // React-friendly value set
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(el, "");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(80);
+
+    // Select-all + delete, then type char by char
+    el.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", code: "KeyA", ctrlKey: true, bubbles: true })
+    );
+    setter?.call(el, "");
+    el.value = "";
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+
+    let built = "";
+    for (const ch of text) {
+      built += ch;
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", { key: ch, bubbles: true, cancelable: true })
+      );
+      setter?.call(el, built);
+      el.value = built;
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch, inputType: "insertText" }));
+      el.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
+      await sleep(35 + Math.floor(Math.random() * 45));
+    }
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    await sleep(200);
   }
 
   function findGroupResult(groupName) {
     const target = normalize(groupName);
-    const dialogs = queryAllDeep('[role="dialog"]');
-    const roots = dialogs.length ? dialogs : [document];
+    if (!target) return null;
+    const roots = dialogs().length ? dialogs() : [document];
+
     for (const root of roots) {
-      const options = [
-        ...queryAllDeep('[role="option"]', root),
-        ...queryAllDeep('[role="listitem"]', root),
-        ...queryAllDeep('[role="row"]', root),
-        ...queryAllDeep('[role="button"]', root),
-        ...queryAllDeep('div[tabindex="0"]', root),
+      // Prefer explicit options / rows
+      const candidates = [
+        ...queryAll('[role="option"]', root),
+        ...queryAll('[role="listitem"]', root),
+        ...queryAll('[role="row"]', root),
+        ...findClickables(root),
       ].filter(visible);
 
-      let best = null;
-      let bestScore = 0;
-      for (const el of options) {
-        const label = normalize(el.getAttribute("aria-label") || textOf(el));
-        if (!label || label.length > 120) continue;
-        if (label === target) return el;
-        if (label.includes(target) || target.includes(label)) {
-          const score = Math.min(label.length, target.length);
-          if (score > bestScore) {
-            best = el;
-            bestScore = score;
+      const exact = candidates.find((el) => {
+        const label = labelOf(el);
+        return label === target || label.startsWith(target + " ");
+      });
+      if (exact) return exact;
+
+      const partial = pickBest(candidates, (el) => {
+        const label = labelOf(el);
+        if (!label || label.length > 160) return 0;
+        if (/^post$|^share$|^cancel$|^close$|^search/.test(label)) return 0;
+        if (label === target) return 1000;
+        if (label.includes(target)) return 800 - Math.abs(label.length - target.length);
+        // Facebook often nests the name in a child span
+        const childText = normalize(textOf(el));
+        if (childText.includes(target)) return 600;
+        return 0;
+      });
+      if (partial) return partial;
+
+      // Fallback: walk text nodes
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      let node = walker.currentNode;
+      while (node) {
+        if (node.nodeType === 1 && visible(node)) {
+          const t = normalize(node.childNodes.length <= 3 ? textOf(node) : "");
+          if (t === target || (t.includes(target) && t.length < 120)) {
+            const clickable =
+              node.closest?.('[role="option"], [role="listitem"], [role="row"], [role="button"], [tabindex="0"]') ||
+              node;
+            if (visible(clickable)) return clickable;
           }
         }
+        node = walker.nextNode();
       }
-      if (best) return best;
     }
     return null;
   }
 
   function findPostConfirmButton() {
-    return (
-      findClickableByText([/^post$/, /^share$/, /^publish$/, /^send$/]) ||
-      findByRoleAndName("button", /^(post|share|publish|send)$/)
-    );
+    const roots = dialogs().length ? dialogs() : [document];
+    for (const root of roots) {
+      const btn = pickBest(findClickables(root), (el) => {
+        const label = labelOf(el);
+        if (!label || label.length > 40) return 0;
+        // Prefer Post inside the share-to-group composer
+        if (/^post$/.test(label)) return 1000;
+        if (/^share$/.test(label)) return 700;
+        if (/^publish$/.test(label)) return 800;
+        return 0;
+      });
+      if (btn) {
+        // Skip disabled-looking buttons
+        const ariaDisabled = elDisabled(btn);
+        if (!ariaDisabled) return btn;
+      }
+    }
+    return null;
+  }
+
+  function elDisabled(el) {
+    if (!el) return true;
+    if (el.getAttribute("aria-disabled") === "true") return true;
+    if (el.hasAttribute("disabled")) return true;
+    const style = window.getComputedStyle(el);
+    if (Number(style.opacity) < 0.5) return true;
+    return false;
+  }
+
+  async function waitForEnabledPost(timeout = 12000) {
+    return waitFor(() => {
+      const btn = findPostConfirmButton();
+      if (btn && !elDisabled(btn)) return btn;
+      return null;
+    }, { timeout });
   }
 
   async function runShareOnce(group) {
@@ -244,49 +421,66 @@
 
     for (let attempt = 1; attempt <= MAX_STEP_ATTEMPTS; attempt++) {
       try {
+        await reportStep(`Preparing share to “${group.name}” (try ${attempt}/${MAX_STEP_ATTEMPTS})…`);
         await closeOpenDialogs();
-        await sleep(400);
+        await sleep(500);
 
-        const shareBtn = await waitFor(() => findShareButton(), { timeout: 10000 });
-        if (!shareBtn) throw new Error("Could not find the Share button on this post.");
+        await reportStep("Looking for Share on this post…");
+        const shareBtn = await waitFor(() => findShareButton(), { timeout: 12000 });
+        if (!shareBtn) throw new Error("Could not find the Share button on this post. Open the post permalink and try again.");
         click(shareBtn);
-        await sleep(900);
-
-        const groupOpt = await waitFor(() => findShareToGroupOption(), { timeout: 10000 });
-        if (!groupOpt) throw new Error('Could not find "Share to a group". Open Share manually once to check the UI.');
-        click(groupOpt);
         await sleep(1100);
 
-        const search = await waitFor(() => findGroupSearchInput(), { timeout: 10000 });
-        if (!search) throw new Error("Could not find the group search field.");
-        await typeInto(search, group.name);
+        await reportStep('Choosing “Share to a group”…');
+        const groupOpt = await waitFor(() => findShareToGroupOption(), { timeout: 12000 });
+        if (!groupOpt) {
+          throw new Error(
+            'Could not find “Share to a group”. Click Share once manually and confirm that option appears for this post.'
+          );
+        }
+        click(groupOpt);
+        await sleep(1300);
+
+        await reportStep(`Searching for group “${group.name}”…`);
+        const search = await waitFor(() => findGroupSearchInput(), { timeout: 12000 });
+        if (!search) throw new Error("Could not find the group search field in the share dialog.");
+        await clearAndType(search, group.name);
+        await sleep(1400);
+
+        await reportStep(`Selecting “${group.name}” from results…`);
+        const result = await waitFor(() => findGroupResult(group.name), { timeout: 14000 });
+        if (!result) {
+          throw new Error(
+            `Could not find “${group.name}” in Facebook’s group search. Use the exact group name, and make sure you joined it.`
+          );
+        }
+        click(result);
         await sleep(1200);
 
-        const result = await waitFor(() => findGroupResult(group.name), { timeout: 12000 });
-        if (!result) throw new Error(`Could not find group "${group.name}" in search results.`);
-        click(result);
-        await sleep(900);
-
-        const postBtn = await waitFor(() => findPostConfirmButton(), { timeout: 10000 });
-        if (!postBtn) throw new Error("Could not find the final Post/Share button.");
+        await reportStep("Clicking Post…");
+        const postBtn = await waitForEnabledPost(14000);
+        if (!postBtn) throw new Error("Could not find an enabled Post button after selecting the group.");
         click(postBtn);
-        await sleep(1500);
+        await sleep(1800);
 
         const after = detectChallenge();
         if (after) return { ok: false, blocked: true, error: after };
 
-        await sleep(600);
+        // Best-effort success: dialog should close or Post control disappear
+        await sleep(700);
+        await reportStep(`Shared to “${group.name}”.`);
         await closeOpenDialogs();
         return { ok: true, groupId: group.id, groupName: group.name };
       } catch (err) {
         if (err.blocked || /challenge|captcha|blocked|suspended/i.test(err.message || "")) {
           return { ok: false, blocked: true, error: err.message };
         }
+        await reportStep(err.message || String(err));
         if (attempt >= MAX_STEP_ATTEMPTS) {
           return { ok: false, blocked: false, error: err.message || String(err) };
         }
         await closeOpenDialogs();
-        await sleep(800);
+        await sleep(900);
       }
     }
     return { ok: false, error: "Share failed after retries." };
@@ -329,23 +523,42 @@
     if (sec < 60) return `${sec}s`;
     const m = Math.floor(sec / 60);
     const s = sec % 60;
-    return `${m}m ${s}s`;
+    return `${m}m ${String(s).padStart(2, "0")}s`;
   }
 
-  function renderBanner(state) {
+  function stopCountdown() {
+    if (countdownTimer) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+    }
+  }
+
+  function startCountdownTick() {
+    stopCountdown();
+    countdownTimer = setInterval(() => {
+      if (!lastState) return;
+      renderBanner(lastState, true);
+    }, 1000);
+  }
+
+  function renderBanner(state, fromTick = false) {
     const session = state?.session;
     if (!session || session.status === "idle") {
+      stopCountdown();
       const existing = document.getElementById(BANNER_ID);
       if (existing) existing.remove();
       return;
     }
+    if (!fromTick) lastState = state;
     const el = ensureBanner();
     el.dataset.status = session.status;
     const msg = el.querySelector(".fgs-banner-msg");
     const meta = el.querySelector(".fgs-banner-meta");
     const title = el.querySelector(".fgs-banner-title");
     title.textContent = `Group Share · ${session.status}`;
-    msg.textContent = session.message || session.lastError || "";
+    if (!fromTick || session.status !== "waiting") {
+      msg.textContent = session.message || session.lastError || "";
+    }
     const used = state.dayStats?.count ?? 0;
     const cap = state.settings?.dailyCap ?? 100;
     const idx = session.index ?? 0;
@@ -354,6 +567,9 @@
     if (session.status === "waiting" && session.nextActionAt) {
       const reason = session.waitReason === "batch_break" ? "batch break" : "next share";
       eta = ` · ${reason} in ${formatEta(session.nextActionAt)}`;
+      if (!countdownTimer) startCountdownTick();
+    } else {
+      stopCountdown();
     }
     meta.textContent = `${idx}/${total} queue · ${used}/${cap} today${eta}`;
   }
@@ -411,5 +627,5 @@
 
   ensureLauncher();
   refreshState();
-  setInterval(refreshState, 5000);
+  setInterval(refreshState, 1000);
 })();

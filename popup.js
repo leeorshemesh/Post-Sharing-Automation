@@ -317,6 +317,29 @@
     if (message?.type === "FGS_STATE") refresh();
   });
 
+  $("btn-export").addEventListener("click", async () => {
+    const groups = state?.groups || [];
+    const setId = state?.activeSetId || "california";
+    const payload = {
+      id: setId,
+      name: state?.groupSets?.[setId]?.name || setId,
+      description: "Exported from extension UI",
+      groups: groups.map((g) => ({
+        name: g.name,
+        url: g.url || "",
+      })),
+    };
+    const text = JSON.stringify(payload, null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+      alert(
+        `Copied ${groups.length} group(s) as JSON.\n\nPaste into data/groups-${setId}.json and commit if you want the file to match.`
+      );
+    } catch (_) {
+      prompt("Copy this JSON:", text);
+    }
+  });
+
   refresh();
-  setInterval(refresh, 2000);
+  setInterval(refresh, 1000);
 })();
