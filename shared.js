@@ -16,14 +16,29 @@ const FGS = (() => {
     },
   };
 
+  // Still paced like a careful human, but not glacial.
+  // ~40–75s between groups + short break every 12 ≈ ~1.5–2.5h for 100 shares.
+  const SETTINGS_REVISION = 2;
   const DEFAULT_SETTINGS = {
-    delayMinSec: 90,
-    delayMaxSec: 180,
-    batchSize: 10,
-    batchBreakMinSec: 8 * 60,
-    batchBreakMaxSec: 15 * 60,
+    settingsRevision: SETTINGS_REVISION,
+    delayMinSec: 40,
+    delayMaxSec: 75,
+    batchSize: 12,
+    batchBreakMinSec: 3 * 60,
+    batchBreakMaxSec: 6 * 60,
     dailyCap: 100,
   };
+
+  function isLegacyV1Timing(settings) {
+    if (!settings) return false;
+    return (
+      settings.delayMinSec === 90 &&
+      settings.delayMaxSec === 180 &&
+      settings.batchSize === 10 &&
+      settings.batchBreakMinSec === 8 * 60 &&
+      settings.batchBreakMaxSec === 15 * 60
+    );
+  }
 
   const SESSION_IDLE = {
     status: "idle", // idle | running | paused | blocked | waiting | done
@@ -137,7 +152,27 @@ const FGS = (() => {
 
   async function getSettings() {
     const { settings } = await getStorage(["settings"]);
-    return { ...DEFAULT_SETTINGS, ...(settings || {}) };
+    let merged = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+
+    // One-time migrate from the original slow defaults (keep custom user timings)
+    const rev = settings?.settingsRevision || 0;
+    if (rev < SETTINGS_REVISION && (!settings || isLegacyV1Timing(settings))) {
+      merged = {
+        ...merged,
+        delayMinSec: DEFAULT_SETTINGS.delayMinSec,
+        delayMaxSec: DEFAULT_SETTINGS.delayMaxSec,
+        batchSize: DEFAULT_SETTINGS.batchSize,
+        batchBreakMinSec: DEFAULT_SETTINGS.batchBreakMinSec,
+        batchBreakMaxSec: DEFAULT_SETTINGS.batchBreakMaxSec,
+        settingsRevision: SETTINGS_REVISION,
+      };
+      await setStorage({ settings: merged });
+    } else if (rev < SETTINGS_REVISION) {
+      merged = { ...merged, settingsRevision: SETTINGS_REVISION };
+      await setStorage({ settings: merged });
+    }
+
+    return merged;
   }
 
   async function saveSettings(partial) {

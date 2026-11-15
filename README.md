@@ -37,7 +37,7 @@ After code or group-file changes, click **Reload** on the extension card (or run
 2. Open the Facebook **post** to share (keep that tab open).
 3. In the popup, choose **California** or **Whole US**.
 4. Click **Share to my groups** on the page, or **Start** in the popup.
-5. Leave the tab open. Default pacing: 90–180s between shares, 8–15 min break every 10, stop at 100/day.
+5. Leave the tab open. Default pacing: 40–75s between shares, 3–6 min break every 12, stop at 100/day.
 6. If Facebook shows a checkpoint/CAPTCHA, finish it manually → **Resume**.
 
 ## Group JSON format
@@ -60,9 +60,9 @@ After code or group-file changes, click **Reload** on the extension card (or run
 
 | Setting | Default |
 |---|---|
-| Inter-group delay | 90–180 seconds |
-| Batch size | 10 |
-| Batch break | 8–15 minutes |
+| Inter-group delay | 40–75 seconds |
+| Batch size | 12 |
+| Batch break | 3–6 minutes |
 | Daily cap | 100 |
 | Groups per set | ≤ 100 |
 

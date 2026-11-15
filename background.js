@@ -282,7 +282,7 @@ async function startSession({ groupIds, tabId, postUrl }) {
 
   await broadcast({ type: "FGS_STATE" });
   // Small human-like delay before first share
-  await scheduleNext(FGS.randomBetween(3, 8) * 1000, "start_delay");
+  await scheduleNext(FGS.randomBetween(2, 4) * 1000, "start_delay");
   return { ok: true, queued: queue.length };
 }
 
@@ -302,7 +302,7 @@ async function resumeSession() {
     message: "Resuming…",
   });
   await broadcast({ type: "FGS_STATE" });
-  await scheduleNext(FGS.randomBetween(2, 5) * 1000, "resume_delay");
+  await scheduleNext(FGS.randomBetween(1, 3) * 1000, "resume_delay");
   return { ok: true };
 }
 

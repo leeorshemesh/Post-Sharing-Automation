@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Facebook Group Share",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Semi-automatically share an existing Facebook post to California or US group sets with human-like delays and a daily cap.",
   "permissions": ["storage", "tabs", "alarms"],
   "host_permissions": [

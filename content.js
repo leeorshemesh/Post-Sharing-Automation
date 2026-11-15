@@ -665,7 +665,7 @@
       for (const ch of text) {
         document.execCommand("insertText", false, ch);
         el.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch, inputType: "insertText" }));
-        await sleep(35 + Math.floor(Math.random() * 40));
+        await sleep(18 + Math.floor(Math.random() * 28));
       }
       return;
     }
@@ -694,7 +694,7 @@
       el.value = built;
       el.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch, inputType: "insertText" }));
       el.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
-      await sleep(35 + Math.floor(Math.random() * 45));
+      await sleep(18 + Math.floor(Math.random() * 28));
     }
     el.dispatchEvent(new Event("change", { bubbles: true }));
     await sleep(200);
@@ -1039,7 +1039,7 @@
           );
         }
         await clearAndType(search, group.name);
-        await sleep(1500);
+        await sleep(500);
 
         await reportStep(`3/5 Selecting “${group.name}”…`);
         const result = await waitFor(() => findGroupResult(group.name), { timeout: 14000 });
@@ -1049,7 +1049,7 @@
           );
         }
         click(result, { allowSameOrigin: true });
-        await sleep(1400);
+        await sleep(600);
 
         // 4) Create post popup → Post
         await reportStep("4/5 Waiting for Create post…");
@@ -1061,7 +1061,7 @@
         }
 
         await reportStep("5/5 Clicking Post (once)…");
-        await sleep(600);
+        await sleep(350);
         const postBtn = await waitForCreatePostSubmit(20000);
         if (!postBtn) {
           throw new Error(
@@ -1085,7 +1085,7 @@
         const after = detectChallenge();
         if (after) return { ok: false, blocked: true, error: after };
 
-        await sleep(400);
+        await sleep(250);
         return { ok: true, groupId: group.id, groupName: group.name };
       } catch (err) {
         if (postClicked) {
@@ -1101,7 +1101,7 @@
           return { ok: false, blocked: false, error: err.message || String(err) };
         }
         await dismissLeftoverShareUi();
-        await sleep(900);
+        await sleep(600);
       }
     }
     return { ok: false, error: "Share failed after retries." };
