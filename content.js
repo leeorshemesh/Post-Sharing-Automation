@@ -347,6 +347,66 @@
     );
   }
 
+  function destinationTileForLabel(labelEl) {
+    // Facebook layout: [icon of 3 people] on top, "Group" caption underneath.
+    // The caption span is often NOT inside the role=button — both sit in a tile wrapper.
+    if (!labelEl) return null;
+
+    const direct = clickableAncestor(labelEl);
+    if (
+      direct &&
+      direct !== labelEl &&
+      visible(direct) &&
+      !looksUnusable(direct) &&
+      (direct.getAttribute("role") === "button" ||
+        direct.tagName === "BUTTON" ||
+        direct.tagName === "A" ||
+        direct.getAttribute("tabindex") === "0")
+    ) {
+      return direct;
+    }
+
+    // Walk up a few wrappers looking for a compact tile that also has an icon/button
+    let scope = labelEl.parentElement;
+    for (let depth = 0; depth < 5 && scope; depth++) {
+      const rect = scope.getBoundingClientRect();
+      // Destination tiles are small (icon + caption), not the whole share menu
+      if (rect.width > 20 && rect.width < 160 && rect.height > 20 && rect.height < 180) {
+        if (
+          scope.getAttribute("role") === "button" ||
+          scope.getAttribute("tabindex") === "0" ||
+          scope.tagName === "A"
+        ) {
+          if (!looksUnusable(scope)) return scope;
+        }
+        const inner =
+          scope.querySelector?.('[role="button"], a[href], button, [tabindex="0"]') || null;
+        if (inner && visible(inner) && !looksUnusable(inner)) return inner;
+        // Whole tile div is the hit target even without role
+        if (!looksUnusable(scope)) return scope;
+      }
+      scope = scope.parentElement;
+    }
+
+    return direct && visible(direct) && !looksUnusable(direct) ? direct : null;
+  }
+
+  function isShareDestinationCluster(el) {
+    const t = normalize(textOf(el)).slice(0, 400);
+    if (!t) return false;
+    // Share sheet destinations: Group with caption under people icon, among Feed/Story/etc.
+    const hasGroup = /\bgroup\b/.test(t);
+    const peers =
+      Number(/\bfeed\b/.test(t)) +
+      Number(/\bstory\b/.test(t)) +
+      Number(/\bpage\b/.test(t)) +
+      Number(/\breel\b/.test(t)) +
+      Number(/\bmessenger\b/.test(t)) +
+      Number(/\bfriend\b/.test(t));
+    const hasShareTo = /share to/.test(t);
+    return hasGroup && (hasShareTo || peers >= 1);
+  }
+
   function shareSheetRoots() {
     const layered = [
       ...dialogs(),
@@ -356,16 +416,21 @@
       ...queryAll('[aria-label*="share" i]'),
     ].filter(visible);
 
-    // Facebook often renders the share popover without role=dialog.
-    // Anchor on the "Share to" label and climb to a reasonable container.
-    for (const label of findExactTextNodes("Share to", document)) {
+    // Popover often has no dialog role — climb from "Share to" or a Group caption
+    const anchors = [
+      ...findExactTextNodes("Share to", document),
+      ...findExactTextNodes("Share", document).filter((el) => {
+        // Section heading near destinations, not the post Share arrow
+        const t = normalize(textOf(el.parentElement || el));
+        return t.includes("group") || t.includes("feed") || t.includes("story");
+      }),
+      ...findExactTextNodes("Group", document),
+    ];
+
+    for (const label of anchors) {
       let scope = label.parentElement;
-      for (let i = 0; i < 8 && scope; i++) {
-        const t = normalize(textOf(scope));
-        if (
-          t.includes("share to") &&
-          (t.includes("group") || t.includes("feed") || t.includes("story"))
-        ) {
+      for (let i = 0; i < 10 && scope; i++) {
+        if (isShareDestinationCluster(scope)) {
           layered.push(scope);
           break;
         }
@@ -373,67 +438,79 @@
       }
     }
 
-    return [...new Set(layered.length ? layered : [])];
+    return [...new Set(layered)];
   }
 
   function findGroupUnderShareTo() {
-    // UI: after Share arrow → popover with "Share to" → destination tile "Group"
+    // UI: Share arrow → sheet with section "Share to" → tile = people icon + "Group" caption
     const roots = shareSheetRoots();
     const searchRoots = roots.length ? roots : [document];
 
     for (const root of searchRoots) {
-      // 1) Exact "Group" text near Share to / Feed / Story
-      const groupLabels = findExactTextNodes("Group", root);
-      for (const labelEl of groupLabels) {
-        const clickable = clickableAncestor(labelEl);
-        if (!visible(clickable) || looksUnusable(clickable)) continue;
-        // Must not be the nav "Groups" item (usually longer path / different context)
-        const aria = normalize(clickable.getAttribute("aria-label") || "");
-        if (/groups$/.test(aria) && aria !== "group") continue;
-        const bubble = normalize(textOf(clickable)).slice(0, 80);
-        // Destination tiles are short ("Group"); nav links are longer
-        if (bubble.length > 40 && !/^group\b/.test(bubble)) continue;
-        return clickable;
-      }
-
-      // 2) role/aria based
-      const candidates = [
-        ...findClickables(root),
-        ...queryAll('[role="link"]', root).filter(visible),
-        ...queryAll("a[href]", root).filter(visible),
-      ];
-      const scored = pickBest(candidates, (el) => {
-        if (looksUnusable(el)) return 0;
-        try {
-          const href = hrefOf(el);
-          if (href) {
-            const u = new URL(href, location.href);
-            if (u.origin !== location.origin) return 0;
+      // A) aria-label="Group" on the icon button (common for the 3-people glyph)
+      const ariaGroup = pickBest(
+        [
+          ...queryAll('[aria-label="Group" i]', root),
+          ...queryAll('[aria-label="group" i]', root),
+          ...findClickables(root),
+          ...queryAll('[role="link"]', root),
+          ...queryAll("a[href]", root),
+        ].filter(visible),
+        (el) => {
+          if (looksUnusable(el)) return 0;
+          try {
+            const href = hrefOf(el);
+            if (href && new URL(href, location.href).origin !== location.origin) return 0;
+          } catch (_) {
+            return 0;
           }
-        } catch (_) {
+          const aria = normalize(el.getAttribute("aria-label") || "");
+          const label = labelOf(el);
+          if (aria === "group" || label === "group") return 1000;
+          if (/^share to (a )?group$/.test(label) || /^share to (a )?group$/.test(aria)) return 900;
           return 0;
         }
-        const label = labelOf(el);
-        const aria = normalize(el.getAttribute("aria-label") || "");
-        if (label === "group" || aria === "group") return 1000;
-        if (/^share to (a )?group$/.test(label)) return 900;
-        if (label === "groups" || aria === "groups") return 200; // weak — often left nav
-        return 0;
-      });
-      if (scored) return scored;
+      );
+      if (ariaGroup) return ariaGroup;
+
+      // B) Visible caption "Group" under the people icon → resolve its tile wrapper
+      const groupLabels = findExactTextNodes("Group", root);
+      for (const labelEl of groupLabels) {
+        // Skip left-rail "Groups" style targets
+        const ancestors = normalize(textOf(labelEl.closest?.('[role="navigation"]') || ""));
+        if (ancestors && ancestors.length > 0) continue;
+
+        const tile = destinationTileForLabel(labelEl);
+        if (!tile) continue;
+
+        const aria = normalize(tile.getAttribute("aria-label") || "");
+        if (aria === "groups" || /see (all )?groups/.test(aria)) continue;
+
+        // Prefer tiles that live in a Share to / Feed / Story cluster
+        let inCluster = false;
+        let p = tile.parentElement;
+        for (let i = 0; i < 8 && p; i++) {
+          if (isShareDestinationCluster(p)) {
+            inCluster = true;
+            break;
+          }
+          p = p.parentElement;
+        }
+        if (roots.length && !inCluster && root === document) continue;
+        if (inCluster || roots.length) return tile;
+      }
     }
 
-    // 3) Document-wide: "Share to" present, then closest "Group" tile
-    const shareTo = findExactTextNodes("Share to", document)[0];
-    if (shareTo) {
-      let scope = shareTo.parentElement;
-      for (let i = 0; i < 10 && scope; i++) {
-        const groupLabels = findExactTextNodes("Group", scope);
-        if (groupLabels.length) {
-          const clickable = clickableAncestor(groupLabels[0]);
-          if (visible(clickable) && !looksUnusable(clickable)) return clickable;
+    // C) Last resort document-wide caption → tile (only if Share to / peer destinations exist)
+    if (shareSheetVisible()) {
+      for (const labelEl of findExactTextNodes("Group", document)) {
+        const tile = destinationTileForLabel(labelEl);
+        if (!tile) continue;
+        let p = tile.parentElement;
+        for (let i = 0; i < 8 && p; i++) {
+          if (isShareDestinationCluster(p)) return tile;
+          p = p.parentElement;
         }
-        scope = scope.parentElement;
       }
     }
 
@@ -442,11 +519,15 @@
 
   function shareSheetVisible() {
     if (findExactTextNodes("Share to", document).length) return true;
-    if (findGroupUnderShareTo()) return true;
-    return shareSheetRoots().some((root) => {
-      const t = normalize(textOf(root));
-      return t.includes("share to") || t.includes("share now");
-    });
+    // Destination row without relying on exact "Share to" wording
+    for (const g of findExactTextNodes("Group", document)) {
+      let p = g.parentElement;
+      for (let i = 0; i < 8 && p; i++) {
+        if (isShareDestinationCluster(p)) return true;
+        p = p.parentElement;
+      }
+    }
+    return shareSheetRoots().some((root) => isShareDestinationCluster(root));
   }
 
   function findGroupSearchInput() {
