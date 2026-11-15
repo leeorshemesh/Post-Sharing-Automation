@@ -54,8 +54,32 @@
     if (msg) msg.textContent = message;
   }
 
+  function hrefOf(el) {
+    const a = el?.closest?.("a[href]") || (el?.tagName === "A" ? el : null);
+    return a?.getAttribute?.("href") || "";
+  }
+
+  function isNavigatingLink(el) {
+    const href = hrefOf(el);
+    if (!href || href === "#" || href.startsWith("javascript:")) return false;
+    try {
+      const u = new URL(href, location.href);
+      // External site — never click
+      if (u.origin !== location.origin) return true;
+      // Different Facebook path (would leave this post view)
+      if (u.pathname !== location.pathname || u.search !== location.search) return true;
+    } catch (_) {
+      return true;
+    }
+    return false;
+  }
+
   function click(el) {
     if (!el) return false;
+    if (isNavigatingLink(el)) {
+      console.warn("[FGS] Refusing to click navigating link:", hrefOf(el));
+      return false;
+    }
     el.scrollIntoView({ block: "center", inline: "nearest" });
     const rect = el.getBoundingClientRect();
     const x = rect.left + Math.min(rect.width / 2, 20);
@@ -68,7 +92,8 @@
     el.dispatchEvent(new PointerEvent("pointerup", opts));
     el.dispatchEvent(new MouseEvent("mouseup", opts));
     el.dispatchEvent(new MouseEvent("click", opts));
-    if (typeof el.click === "function") el.click();
+    // Prefer dispatch-only for controls that might be wrapped in links
+    if (typeof el.click === "function" && !el.closest?.("a[href]")) el.click();
     return true;
   }
 
@@ -93,17 +118,16 @@
   }
 
   function findClickables(root = document) {
+    // Intentionally avoid blanket a[href] — those navigate away from the post
     return [
       ...queryAll('[role="button"]', root),
       ...queryAll('[role="menuitem"]', root),
       ...queryAll('[role="menuitemradio"]', root),
       ...queryAll('[role="option"]', root),
-      ...queryAll('[role="link"]', root),
       ...queryAll("div[tabindex='0']", root),
       ...queryAll("span[role='button']", root),
       ...queryAll("button", root),
-      ...queryAll("a[href]", root),
-    ].filter(visible);
+    ].filter((el) => visible(el) && !isNavigatingLink(el));
   }
 
   function pickBest(candidates, scoreFn) {
@@ -170,23 +194,44 @@
     return null;
   }
 
-  async function closeOpenDialogs() {
-    for (let i = 0; i < 4; i++) {
-      const roots = [...dialogs(), document];
+  function dialogKind(dlg) {
+    const label = normalize(dlg.getAttribute("aria-label") || "");
+    const text = normalize(textOf(dlg)).slice(0, 800);
+    if (/create post/.test(text) || /say something about this/.test(text)) return "create_post";
+    if (/share to/.test(text) || /^share$/.test(label)) return "share_sheet";
+    if (/search (for )?groups|suggested groups|all groups/.test(text)) return "group_picker";
+    // Post opened as a lightbox/modal — must never close this
+    if (dlg.querySelector?.('[role="article"]')) return "post_viewer";
+    if (/photo|video|reel|post/.test(label) && dlg.querySelector?.('[aria-label*="Like" i], [aria-label="Share" i], [aria-label*="Comment" i]')) {
+      return "post_viewer";
+    }
+    return "other";
+  }
+
+  function isDisposableShareUi(dlg) {
+    const kind = dialogKind(dlg);
+    return kind === "create_post" || kind === "share_sheet" || kind === "group_picker";
+  }
+
+  async function dismissLeftoverShareUi() {
+    // Only close share/group/create-post sheets. Never Escape (closes the post modal)
+    // and never click Close on the post viewer itself.
+    for (let i = 0; i < 3; i++) {
+      const targets = dialogs().filter(isDisposableShareUi);
+      if (!targets.length) break;
       let closed = false;
-      for (const root of roots) {
-        const close = findByLabel([/^close$/, /^dismiss$/, /^cancel$/], root, { maxLen: 40 });
-        if (close) {
+      for (const root of targets) {
+        const close = findByLabel([/^close$/, /^dismiss$/], root, { maxLen: 40 });
+        if (close && !isNavigatingLink(close)) {
           click(close);
           closed = true;
-          await sleep(350);
+          await sleep(400);
           break;
         }
       }
       if (!closed) break;
     }
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true }));
-    await sleep(250);
+    await sleep(200);
   }
 
   function findPrimaryArticle() {
@@ -205,12 +250,13 @@
 
   function findShareInRoot(root) {
     return pickBest(findClickables(root), (el) => {
+      if (isNavigatingLink(el)) return 0;
       const label = labelOf(el);
       const aria = normalize(el.getAttribute("aria-label") || "");
       if (!label && !aria) return 0;
       // Destinations / later-step controls — not the post Share arrow
       if (/share to|share now|your story|messenger|send in/.test(label + " " + aria)) return 0;
-      if (/^group$|^feed$|^story$|^post$/.test(label)) return 0;
+      if (/^group$|^feed$|^story$|^post$|^close$/.test(label)) return 0;
       // Facebook Share is often an arrow icon with aria-label "Share" / "Send this to…"
       if (aria === "share" || label === "share") return 950;
       if (/^share$/.test(label) || /^share$/.test(aria)) return 900;
@@ -220,13 +266,28 @@
     });
   }
 
-  function findShareButton() {
+  function findPostRoot() {
+    // Prefer the open post dialog/lightbox if present, else the main article
+    const postDlg = dialogs().find((d) => dialogKind(d) === "post_viewer");
+    if (postDlg) return postDlg;
     const article = findPrimaryArticle();
-    if (article) {
+    if (article) return article;
+    return null;
+  }
+
+  function findShareButton() {
+    const root = findPostRoot();
+    if (root) {
+      const btn = findShareInRoot(root);
+      if (btn) return btn;
+    }
+    // Last resort: articles only — never whole-document (hits nav/ads/links)
+    const articles = queryAll('[role="article"]').filter(visible);
+    for (const article of articles) {
       const btn = findShareInRoot(article);
       if (btn) return btn;
     }
-    return findShareInRoot(document);
+    return null;
   }
 
   function shareSheetRoots() {
@@ -420,12 +481,14 @@
   }
 
   function isCreatePostDialog(root) {
-    const t = normalize(textOf(root)).slice(0, 500);
-    return (
-      /create post/.test(t) ||
-      /say something about this/.test(t) ||
-      /write a post/.test(t)
-    );
+    return dialogKind(root) === "create_post" || (() => {
+      const t = normalize(textOf(root)).slice(0, 500);
+      return (
+        /create post/.test(t) ||
+        /say something about this/.test(t) ||
+        /write a post/.test(t)
+      );
+    })();
   }
 
   function findCreatePostDialog() {
@@ -517,11 +580,18 @@
     const challenge = detectChallenge();
     if (challenge) return { ok: false, blocked: true, error: challenge };
 
+    const startUrl = location.href;
+
     for (let attempt = 1; attempt <= MAX_STEP_ATTEMPTS; attempt++) {
       try {
         await reportStep(`Preparing share to “${group.name}” (try ${attempt}/${MAX_STEP_ATTEMPTS})…`);
-        await closeOpenDialogs();
-        await sleep(500);
+        // Only clear leftover share sheets — Escape/Close was exiting the post lightbox
+        await dismissLeftoverShareUi();
+        await sleep(400);
+
+        if (location.href !== startUrl) {
+          throw new Error("Left the original post page unexpectedly. Re-open the post and Resume.");
+        }
 
         // 1) Post screen → Share (arrow)
         await reportStep("1/5 Clicking Share (arrow) on the post…");
@@ -529,8 +599,14 @@
         if (!shareBtn) {
           throw new Error("Could not find the Share arrow on this post. Open the post and try again.");
         }
-        click(shareBtn);
+        if (!click(shareBtn)) {
+          throw new Error("Share control looked like a link that would leave this post — skipped it.");
+        }
         await sleep(1200);
+
+        if (location.href !== startUrl) {
+          throw new Error("Clicking Share navigated away from the post. Re-open the post and try again.");
+        }
 
         // 2) Share sheet → under "Share to" → Group
         await reportStep('2/5 Clicking “Group” under Share to…');
@@ -596,7 +672,7 @@
         if (attempt >= MAX_STEP_ATTEMPTS) {
           return { ok: false, blocked: false, error: err.message || String(err) };
         }
-        await closeOpenDialogs();
+        await dismissLeftoverShareUi();
         await sleep(900);
       }
     }
